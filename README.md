@@ -85,3 +85,6 @@ screen -Rd session_name -> reattaches session
 ## Evaluation
 
 robot_imitation_glue > ur5station > eval_diffusion_lerobot.py
+
+
+hf upload ramen-noodels/test_5_episodes ./datasets/test_5_episodes --repo-type=dataset
