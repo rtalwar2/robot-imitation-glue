@@ -50,10 +50,10 @@ if __name__ == "__main__":
     import numpy as np
 
     config = DynamixelConfig(
-        joint_ids=[1, 2, 3, 4, 5, 6],
-        joint_offsets=(np.array([0, 4, -6, 2, 0, 6]) * np.pi / 4).tolist(),
-        joint_signs=[1, 1, -1, 1, 1, 1],
-        gripper_config=(7, 194, 152),
+        joint_ids=(1, 2, 3, 4, 5, 6),
+        joint_offsets=[4*np.pi/2, 2*np.pi/2, 0*np.pi/2, -3*np.pi/2, 2*np.pi/2, 7*np.pi/2 ],
+        joint_signs=(1, 1, -1, 1, 1, 1),
+        gripper_config=(7, 195, 154),
     )
     agent = GelloAgent(config, "/dev/ttyUSB1")
     while True:

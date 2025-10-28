@@ -20,7 +20,7 @@ class BaseEnv(abc.ABC):
         """observations as a dict of (str, np.ndarray)"""
 
     @abc.abstractmethod
-    def act(self, robot_pose_se3, gripper_pose, timestamp):
+    def act(self, robot_joints, gripper_pose, timestamp):
         raise NotImplementedError
 
     def reset(self):
@@ -94,6 +94,9 @@ class BaseDatasetRecorder:
 
     def finish_recording(self):
         pass
+
+    def delete_episode(self):
+        raise NotImplementedError
 
     @property
     def n_recorded_episodes(self):

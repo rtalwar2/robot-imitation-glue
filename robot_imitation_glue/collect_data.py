@@ -10,7 +10,6 @@ import rerun as rr
 
 from robot_imitation_glue.base import BaseAgent, BaseDatasetRecorder, BaseEnv
 from robot_imitation_glue.utils import precise_wait
-
 converter_callable = Callable[dict[str, np.ndarray], np.ndarray]
 
 logger = loguru.logger
@@ -63,7 +62,7 @@ def init_keyboard_listener(event: Event, state: State):
             elif hasattr(key, "char") and key.char == "q":
                 event.quit = True
 
-            elif hasattr(key, "char") and key.char == "d" and not state.is_recording:
+            elif hasattr(key, "char") and key.char == "d" and state.is_recording:
                 # delete the last episode
                 event.delete_last = True
         except Exception as e:
@@ -93,8 +92,6 @@ def collect_data(  # noqa: C901
 
     control_period = 1 / frequency
 
-    target_pose = env.get_robot_pose_se3()
-    target_gripper_state = env.get_gripper_opening()
 
     while not state.is_stopped:
         cycle_end_time = time.time() + control_period
@@ -120,9 +117,10 @@ def collect_data(  # noqa: C901
 
         elif event.delete_last and not state.is_recording:
             print("delete last episode")
+            state.is_recording=False
             # delete last episode
-            raise NotImplementedError("delete last episode not implemented")
-
+            dataset_recorder.delete_episode()
+            
         elif event.pause and not state.is_recording:
             state.is_paused = True
             print("pause teleop")
@@ -142,7 +140,7 @@ def collect_data(  # noqa: C901
         event.clear()
 
         # update GUI.
-        vis_img = observation["scene_image"].copy()
+        vis_img = observation["wrist_image"].copy()
 
         # visualize state is_recording, is_paused
         if state.is_recording:
@@ -158,10 +156,14 @@ def collect_data(  # noqa: C901
             (255, 255, 255),
             2,
         )
-        rr.log("image", rr.Image(vis_img, rr.ColorModel.RGB))
-        rr.log("wrist_image", rr.Image(observation["wrist_image"], rr.ColorModel.RGB))
-        rr.log("scene_image", rr.Image(observation["scene_image"], rr.ColorModel.RGB))
-
+        rr.log("wrist_image", rr.Image(vis_img, rr.ColorModel.RGB))
+        # rr.log("wrist_image", rr.Image(observation["wrist_image"], rr.ColorModel.RGB))
+        rr.log("spectogram", rr.Image(observation["spectogram_image"], rr.ColorModel.RGB))
+        # rr.log("spectogrambgr", rr.Image(observation["spectogram_image"], rr.ColorModel.BGR))
+        # print(f"wrist image shape: {observation['wrist_image'].shape}")
+        # print(f"spectogram image shape: {observation['spectogram_image'].shape}")
+        # rr.log("scene_image", rr.Image(observation["scene_image"], rr.ColorModel.RGB))
+        rr.log("joints", rr.TextLog(str(observation["joints"])))
         # if paused, do not collect teleop or execute action
         if state.is_paused:
             time.sleep(0.1)
@@ -170,26 +172,30 @@ def collect_data(  # noqa: C901
         action = teleop_agent.get_action(observation)
         logger.info(f"Action: {action}")
 
-        new_robot_target_se3_pose, new_gripper_target_width = teleop_to_pose_converter(
-            target_pose, target_gripper_state, action
-        )
+        # new_robot_target_se3_pose, new_gripper_target_width = teleop_to_pose_converter(
+        #     target_pose, target_gripper_state, action
+        # )
 
         # store the actions in absolute format, to facilitate any action conversion later on.
         # observation["target_abs_robot_se3e_pose"] = new_robot_target_se3_pose
         # observation["target_abs_gripper_pose"] = new_gripper_target_width
 
-        policy_formatted_action = abs_pose_to_policy_action(
-            target_pose, target_gripper_state, new_robot_target_se3_pose, new_gripper_target_width
-        )
+        # policy_formatted_action = abs_pose_to_policy_action(
+        #     target_pose, target_gripper_state, new_robot_target_se3_pose, new_gripper_target_width
+        # )
+        
 
+        # print(policy_formatted_action)
+        # print(policy_formatted_action.shape)
+        gripper_target = (1-action[-1])*0.085
         env.act(
-            robot_pose_se3=new_robot_target_se3_pose,
-            gripper_pose=new_gripper_target_width,
+            robot_joints=action[0:6],
+            gripper_pose=gripper_target,
             timestamp=time.time() + control_period,
         )
 
         if state.is_recording:
-            dataset_recorder.record_step(observation, policy_formatted_action)
+            dataset_recorder.record_step(observation, np.concatenate((action[0:6],np.array([gripper_target])),axis=0))
 
         # wait for end of the control period
         if cycle_end_time > time.time():
@@ -198,13 +204,43 @@ def collect_data(  # noqa: C901
             print("cycle time exceeded control period")
 
         # update the target pose and target gripper state for the next iteration
-        target_pose = new_robot_target_se3_pose
-        target_gripper_state = new_gripper_target_width
+        # target_pose = new_robot_target_se3_pose
+        # target_gripper_state = new_gripper_target_width
 
         # TODO: we now use 'integration' to get the next target pose instead of using the current pose.
         # this is to avoid 'shaking' of the robot, as is done in diffusion policy teleop for example.
-        # but need to verify that this does not cause mismatch between teleop and policy.
+        # but need to verify that this does not causepp mismatch between teleop and policy.
         # and should also check if the distance between the target and the actual robot does not diverge too much.
+
+def teleoperate(  # noqa: C901
+    env: BaseEnv,
+    teleop_agent: BaseAgent
+):
+    assert env.ACTION_SPEC == teleop_agent.ACTION_SPEC
+
+
+    while True:
+        frequency=10
+        control_period = 1/frequency
+        cycle_end_time = time.time() + control_period
+
+        # print("observation time: ", observation_time)
+
+        action = teleop_agent.get_action({})
+        logger.info(f"Action: {action}")
+
+        gripper_target = (1-action[-1])*0.085
+        env.act(
+            robot_joints=action[0:6],
+            gripper_pose=gripper_target,
+            timestamp=time.time() + control_period,
+        )
+
+        # wait for end of the control period
+        if cycle_end_time > time.time():
+            precise_wait(cycle_end_time)
+        else:
+            print("cycle time exceeded control period")
 
 
 if __name__ == "__main__":

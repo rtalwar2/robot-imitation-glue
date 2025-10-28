@@ -16,7 +16,13 @@ from airo_robots.manipulators.hardware.ur_rtde import URrtde
 from airo_spatial_algebra.se3 import SE3Container, normalize_so3_matrix
 
 from robot_imitation_glue.base import BaseEnv
-from robot_imitation_glue.hardware.ipc_camera import RGBCameraPublisher, RGBCameraSubscriber, initialize_ipc
+from robot_imitation_glue.hardware.ipc_btn import BTNSubscriber
+from robot_imitation_glue.hardware.ipc_camera import (
+    RGBCameraPublisher,
+    RGBCameraSubscriber,
+    initialize_ipc,
+)
+from robot_imitation_glue.hardware.ipc_mic import SpectrogramSubscriber
 
 # env consists of 2 realsense cameras and UR3e robot
 
@@ -28,27 +34,30 @@ SCENE_REALSENSE_SERIAL = "231122072220"
 SCENE_CAM_RGB_TOPIC = "scene_rgb"
 SCENE_CAM_RESOLUTION_TOPIC = "scene_resolution"
 
-ROBOT_IP = "10.42.0.162"
+ROBOT_IP = "10.42.0.163"
 
 logger = loguru.logger
 
 
 class CameraFactory:
     def create_wrist_camera():
-        return Realsense(resolution=Realsense.RESOLUTION_480, fps=30, serial_number=WRIST_REALSENSE_SERIAL)
+        return Realsense(
+            resolution=Realsense.RESOLUTION_480,
+            fps=30,
+        )
 
-    def create_scene_camera():
-        return Realsense(resolution=Realsense.RESOLUTION_480, fps=30, serial_number=SCENE_REALSENSE_SERIAL)
+    # def create_scene_camera():
+    #     return Realsense(resolution=Realsense.RESOLUTION_480, fps=30, serial_number=SCENE_REALSENSE_SERIAL)
 
 
 class UR3eStation(BaseEnv):
     ACTION_SPEC = None
     PROPRIO_OBS_SPEC = None
 
-    def __init__(self):
+    def __init__(self, with_instrumentation=False):
         # set up cameras
         initialize_ipc()
-
+        self.with_instrumentation = with_instrumentation
         # Put from here ...
         logger.info("Creating wrist camera publisher.")
         self._wrist_camera_publisher = RGBCameraPublisher(
@@ -66,32 +75,39 @@ class UR3eStation(BaseEnv):
         )
         # ... till here in comments if don't want to use the wrist camera
 
-        logger.info("Creating scene camera publisher.")
-        self._scene_camera_publisher = RGBCameraPublisher(
-            CameraFactory.create_scene_camera,
-            SCENE_CAM_RGB_TOPIC,
-            SCENE_CAM_RESOLUTION_TOPIC,
-            100,
-        )
-        self._scene_camera_publisher.start()
+        # logger.info("Creating scene camera publisher.")
+        # self._scene_camera_publisher = RGBCameraPublisher(
+        #     CameraFactory.create_scene_camera,
+        #     SCENE_CAM_RGB_TOPIC,
+        #     SCENE_CAM_RESOLUTION_TOPIC,
+        #     100,
+        # )
+        # self._scene_camera_publisher.start()
 
-        logger.info("Creating scene camera subscriber.")
-        self._scene_camera_subscriber = RGBCameraSubscriber(
-            SCENE_CAM_RESOLUTION_TOPIC,
-            SCENE_CAM_RGB_TOPIC,
-        )
+        # logger.info("Creating scene camera subscriber.")
+        # self._scene_camera_subscriber = RGBCameraSubscriber(
+        #     SCENE_CAM_RESOLUTION_TOPIC,
+        #     SCENE_CAM_RGB_TOPIC,
+        # )
 
         # self._wrist_camera_subscriber = self._scene_camera_subscriber # Put this out of comments if don't want to use the wrist camera
         # wait for first images
         time.sleep(2)
 
+
+        if self.with_instrumentation:
+            logger.info("creating button subscriber")
+            self.button_subscriber = BTNSubscriber("BTN")
+
+        logger.info("creating spectogram subscriber")
+        self.spectogram_subscriber = SpectrogramSubscriber("MelSpectrogram")
         # set up robot and gripper
         logger.info("connecting to gripper.")
         self.gripper = Robotiq2F85(ROBOT_IP)
 
         logger.info("connecting to robot.")
         self.robot = URrtde(ROBOT_IP, URrtde.UR3E_CONFIG, gripper=self.gripper)
-
+        
         # set up additional sensors if needed.
 
         # rr.init("ur3e-station",spawn=True)
@@ -104,7 +120,9 @@ class UR3eStation(BaseEnv):
         pose as [x,y,z,rx,ry,rz] in robot base frame using Euler angles
         """
         hom_pose = self.robot.get_tcp_pose()
-        rotation_vector = SE3Container.from_homogeneous_matrix(hom_pose).orientation_as_euler_angles
+        rotation_vector = SE3Container.from_homogeneous_matrix(
+            hom_pose
+        ).orientation_as_euler_angles
         position = hom_pose[:3, 3]
         return np.concatenate((position, rotation_vector), axis=0)
 
@@ -121,40 +139,51 @@ class UR3eStation(BaseEnv):
     def get_observations(self):
 
         wrist_image = self._wrist_camera_subscriber.get_rgb_image_as_int()
-        scene_image = self._scene_camera_subscriber.get_rgb_image_as_int()
+        spectogram_image = self.spectogram_subscriber.get_spectogram()
+        # print(spectogram_image)
+        # scene_image = self._scene_camera_subscriber.get_rgb_image_as_int()
         robot_state = self.get_robot_pose_euler().astype(np.float32)
         gripper_state = self.get_gripper_opening().astype(np.float32)
         joints = self.robot.get_joint_configuration().astype(np.float32)
-
-        state = np.concatenate((robot_state, gripper_state), axis=0)
+        ft = np.array(self.robot.rtde_receive.getActualTCPForce()).astype(np.float32)
         # TODO: resize images (but still include the original?)
 
         # resize wrist images to 224x224
         wrist_image_resized = cv2.resize(wrist_image, (224, 224))
         # resize scene img, cut first 200 x pixels
-        scene_image_resized = scene_image.copy()
-        scene_image_resized = scene_image_resized[:, 200:]
+        # scene_image_resized = scene_image.copy()
+        # scene_image_resized = scene_image_resized[:, 200:]
         # resize scene image to 224x224
-        scene_image_resized = cv2.resize(scene_image_resized, (224, 224))
+        # scene_image_resized = cv2.resize(scene_image_resized, (224, 224))
 
+        state = np.concatenate((joints, gripper_state), axis=0)
         obs_dict = {
-            "wrist_image_original": wrist_image,
-            "scene_image_original": scene_image,
+            # "wrist_image_original": wrist_image,
+            # "scene_image_original": scene_image,
             "wrist_image": wrist_image_resized,
-            "scene_image": scene_image_resized,
-            "state": state,
+            # "scene_image": scene_image_resized,
+            "spectogram_image" :spectogram_image,
+            "state":state,
             "robot_pose": robot_state,
             "gripper_state": gripper_state,
             "joints": joints,
+            "ft":ft
         }
 
-        # add to rerun
-        # rr.log("wrist",rr.Image(wrist_image))
-        # rr.log("scene",rr.Image(scene_image))
+        if self.with_instrumentation:
+            button = self.button_subscriber.get_button_state()
+            # print(button)
+
+            obs_dict["btn_state"] = button
+            state = np.concatenate((state, button), axis=0)
+
+        # obs_dict["state"] = state
+
+        # print(f"the state type is {state.dtype}")
 
         return obs_dict
 
-    def act(self, robot_pose_se3, gripper_pose, timestamp):
+    def act(self, robot_joints, gripper_pose, timestamp):
 
         if isinstance(gripper_pose, np.ndarray):
             gripper_pose = gripper_pose[0].item()
@@ -165,15 +194,21 @@ class UR3eStation(BaseEnv):
         if duration < 0:
             logger.warning("Action duration is negative, setting it to 0")
             duration = 0
-        logger.debug(f"Moving robot to pose {robot_pose_se3} with duration {duration}")
+        logger.debug(
+            f"Moving robot to joint configuration {robot_joints} with duration {duration}"
+        )
 
-        robot_pose_se3[:3, :3] = normalize_so3_matrix(robot_pose_se3[:3, :3])
-        self.robot.servo_to_tcp_pose(robot_pose_se3, duration)
-
+        # robot_pose_se3[:3, :3] = normalize_so3_matrix(robot_pose_se3[:3, :3])
+        # self.robot.servo_to_tcp_pose(robot_pose_se3, duration)
+        self.robot.servo_to_joint_configuration(robot_joints, duration)
         # move gripper to target width
         gripper_width = np.clip(
-            gripper_pose, self.gripper.gripper_specs.min_width, self.gripper.gripper_specs.max_width
+            gripper_pose,
+            self.gripper.gripper_specs.min_width,
+            self.gripper.gripper_specs.max_width,
         )
+        logger.debug(f"Moving gripper to {gripper_width} with input {gripper_pose}")
+
         self.gripper._set_target_width(gripper_width)
 
         # do not wait, handling timings is the responsibility of the caller
@@ -181,13 +216,23 @@ class UR3eStation(BaseEnv):
 
     def close(self):
         self._wrist_camera_publisher.stop()
-        self._scene_camera_publisher.stop()
+        # self._scene_camera_publisher.stop()
+
+    def move_robot_to_tcp_pose(self, pose):
+        """move robot to a given SE3 tcp pose"""
+        self.robot.move_to_tcp_pose(pose)
+
+    def move_gripper(self, width):
+        """move gripper to a given width"""
+        self.gripper.move(width)
 
 
 if __name__ == "__main__":
     # set cli logging level to debug
 
-    def convert_relative_to_absolute_action(current_robot_pose, current_gripper_width, action: np.ndarray):
+    def convert_relative_to_absolute_action(
+        current_robot_pose, current_gripper_width, action: np.ndarray
+    ):
         """
         Convert a relative action to an absolute action
         Args:
@@ -240,6 +285,10 @@ if __name__ == "__main__":
         logger.debug(f"Taking action {action}")
         logger.debug(f"Current pose {current_pose}")
 
-        robot_se3, gripper = convert_relative_to_absolute_action(current_pose, obs["gripper_state"], action)
-        env.act(robot_pose_se3=robot_se3, gripper_pose=gripper, timestamp=time.time() + 0.1)
+        robot_se3, gripper = convert_relative_to_absolute_action(
+            current_pose, obs["gripper_state"], action
+        )
+        env.act(
+            robot_pose_se3=robot_se3, gripper_pose=gripper, timestamp=time.time() + 0.1
+        )
         key = cv2.waitKey(100)

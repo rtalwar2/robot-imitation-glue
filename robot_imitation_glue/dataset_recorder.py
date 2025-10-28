@@ -1,9 +1,9 @@
 from pathlib import Path
 
+from lerobot.lerobot.common.datasets.lerobot_dataset import LeRobotDataset
 import numpy as np
 import torch
 
-from lerobot.common.datasets.lerobot_dataset import LeRobotDataset
 from robot_imitation_glue.base import BaseDatasetRecorder
 
 
@@ -73,9 +73,9 @@ class LeRobotDatasetRecorder(BaseDatasetRecorder):
         for key, value in example_obs_dict.items():
             shape = value.shape
             if len(shape) == 0:
-                features[key] = {"dtype": "float32", "shape": (1,), "names": None}
+                features[key] = {"dtype": str(value.dtype), "shape": (1,), "names": None}
             elif len(shape) == 1:
-                features[key] = {"dtype": "float32", "shape": shape, "names": None}
+                features[key] = {"dtype": str(value.dtype), "shape": shape, "names": None}
             elif len(shape) == 3:
                 if not shape[0] == 3:
                     # not hannel first! reorder shape
@@ -91,9 +91,9 @@ class LeRobotDatasetRecorder(BaseDatasetRecorder):
                 self.image_keys.append(key)
             else:
                 self.state_keys.append(key)
-
+        
         # add action to features
-        features["action"] = {"dtype": "float32", "shape": example_action.shape, "names": None}
+        features["action"] = {"dtype": "float64", "shape": example_action.shape, "names": None}
         print(f"Features: {features}")
 
         if self.root_dataset_dir.exists():
@@ -133,6 +133,9 @@ class LeRobotDatasetRecorder(BaseDatasetRecorder):
         for key in self.state_keys:
             frame[key] = torch.tensor(obs[key])
         self.lerobot_dataset.add_frame(frame)
+
+    def delete_episode(self):
+        self.lerobot_dataset.clear_episode_buffer()
 
     def save_episode(self):
         self.lerobot_dataset.save_episode()
