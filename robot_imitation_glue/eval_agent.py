@@ -8,7 +8,7 @@ import rerun as rr
 from lerobot.common.datasets.lerobot_dataset import LeRobotDataset
 from robot_imitation_glue.base import BaseAgent, BaseDatasetRecorder, BaseEnv
 from robot_imitation_glue.utils import precise_wait
-
+from robot_imitation_glue.forward_kinematics_helper import forward_kinematics_ur3e
 # create type for callable that takes obs and returns action
 
 
@@ -85,6 +85,7 @@ def eval(  # noqa: C901
     eval_dataset: LeRobotDataset = None,
     eval_dataset_image_key: str = "scene",
     env_observation_image_key: str = "scene",
+    env_spectogram_key:str = "spectogram_image"
 ):
     """
     Evalulate a (policy) agent on a robot environment.
@@ -134,6 +135,7 @@ def eval(  # noqa: C901
                 # get initial scene image
                 print(eval_dataset.episode_data_index)
                 step_idx = eval_dataset.episode_data_index["from"][eval_dataset_episode].item()
+                print(eval_dataset[step_idx].keys())
                 initial_scene_image = eval_dataset[step_idx][eval_dataset_image_key]
 
                 # convert to numpy array of uint8 values
@@ -150,40 +152,40 @@ def eval(  # noqa: C901
                 # show initial scene image
                 rr.log("initial_scene_image", rr.Image(initial_scene_image))
 
-        target_pose = env.get_robot_pose_se3()
-        target_gripper_state = env.get_gripper_opening()
 
         logger.info("Start teleop")
         logger.debug("moveL robot to current teleop pose")
         # first move slowly to the initial pose of the teleop device
         action = teleop_agent.get_action(env.get_observations())
-        robot_pose, gripper_state = teleop_to_pose_converter(target_pose, target_gripper_state, action)
-        env.move_robot_to_tcp_pose(robot_pose)
+        gripper_target = (1-action[-1])*0.085
+        # robot_pose, gripper_state = teleop_to_pose_converter(target_pose, target_gripper_state, action)
+        env.act(action[0:6],gripper_target,time.time() + control_period)
         logger.debug("robot moved to teleop pose")
-
+        if initial_scene_image is not None:
+            # blend initial scene image with current scene image
+            # blended_image = cv2.addWeighted(initial_scene_image, 0.5, vis_image, 0.5, 0)
+            rr.log("initial_scene_image", rr.Image(initial_scene_image))
         while not state.rollout_active:
+            
             cycle_end_time = time.time() + control_period
 
             observations = env.get_observations()
 
             vis_image = observations[env_observation_image_key]
-
+            spectogram_image = observations[env_spectogram_key]
             rr.log("scene", rr.Image(vis_image))
-            if initial_scene_image is not None:
-                # blend initial scene image with current scene image
-                blended_image = cv2.addWeighted(initial_scene_image, 0.5, vis_image, 0.5, 0)
-                rr.log("initial_scene_image", rr.Image(blended_image))
+            rr.log("spectogram", rr.Image(spectogram_image))
+
 
             action = teleop_agent.get_action(observations)
             logger.debug(f"teleop action: {action}")
 
             # convert teleop action to env action
-            target_pose, target_gripper_state = teleop_to_pose_converter(target_pose, target_gripper_state, action)
-            logger.debug(f"robot_target_pose: {target_pose}")
+            gripper_target = (1-action[-1])*0.085
 
             env.act(
-                robot_pose_se3=target_pose,
-                gripper_pose=target_gripper_state,
+                robot_joints=action[0:6],
+                gripper_pose=gripper_target,
                 timestamp=time.time() + control_period,
             )
 
@@ -206,6 +208,7 @@ def eval(  # noqa: C901
 
         # reset to clear action buffers for chunking agents
         policy_agent.reset()
+        tool_positions = []
 
         while not state.is_stopped and state.rollout_active:
             cycle_end_time = time.time() + control_period
@@ -213,6 +216,7 @@ def eval(  # noqa: C901
             observations = env.get_observations()
 
             vis_image = observations[env_observation_image_key]
+            spectogram_image = observations[env_spectogram_key]
 
             ## print number of episodes to image
             cv2.putText(
@@ -225,27 +229,46 @@ def eval(  # noqa: C901
                 1,
             )
             rr.log("scene", rr.Image(vis_image))
+            rr.log("spectogram", rr.Image(spectogram_image))
 
             action = policy_agent.get_action(observations)
             logger.debug(f"policy action: {action}")
-
-            # convert  action to env action
-            new_robot_target_pose, new_target_gripper_state = policy_to_pose_converter(
-                target_pose, target_gripper_state, action
+            
+            X_B_TCP_virtual = forward_kinematics_ur3e(action[0:6])
+            rr.log(
+                "world/robot/tool_pose",
+                rr.Transform3D(
+                    translation=X_B_TCP_virtual[:3, 3],
+                    mat3x3=X_B_TCP_virtual[:3, :3],
+                ),
             )
-            logger.debug(f"new_robot_target_pose: {new_robot_target_pose}")
-            logger.debug(f"current robot pose: {env.get_robot_pose_se3()}")
+            pos = X_B_TCP_virtual[:3, 3]
+            tool_positions.append(pos)
+
+            rr.log(
+                "world/robot/trajectory",
+                rr.LineStrips3D(np.array(tool_positions, dtype=np.float32)[None, :, :]),
+            )
+
+            next_height = X_B_TCP_virtual[2,3]-0.19
+            if next_height<0.01:
+                print(f"emergency break, almost hitting table with next height:{next_height}")
+                return
+            # convert  action to env action
+            # new_robot_target_pose, new_target_gripper_state = policy_to_pose_converter(
+            #     target_pose, target_gripper_state, action
+            # )
+            # logger.debug(f"new_robot_target_pose: {new_robot_target_pose}")
+            # logger.debug(f"current robot pose: {env.get_robot_pose_se3()}")
 
             env.act(
-                robot_pose_se3=new_robot_target_pose,
-                gripper_pose=new_target_gripper_state,
+                robot_joints=action[0:6],
+                gripper_pose=action[-1],
                 timestamp=time.time() + control_period,
             )
 
-            recorder.record_step(observations, action)
+            recorder.record_step(observations, action.astype(np.float64))
 
-            target_pose = new_robot_target_pose
-            target_gripper_state = new_target_gripper_state
 
             if cycle_end_time > time.time():
                 precise_wait(cycle_end_time)

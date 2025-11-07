@@ -8,12 +8,19 @@ from lerobot.common.datasets.lerobot_dataset import LeRobotDataset
 from lerobot.common.policies.diffusion.configuration_diffusion import PreTrainedConfig
 from lerobot.common.policies.factory import make_policy
 from robot_imitation_glue.base import BaseAgent
-
+import json
 
 def make_lerobot_policy(pretrained_path, dataset_path):
     """ """
     # TODO: try to omit the need to load the dataset, bc it is not always on the same machine and is a source of errors..
     # not sure why Lerobot has not simply stored the metadata in an additional file.
+    # with open(pretrained_path+"/config.json", "r") as f:
+    #     cfg = json.load(f)
+
+    # # Wrap it with type info if missing
+    # if "type" not in cfg:
+    #     cfg = {"type": "diffusion", **cfg}
+
     policy_config = PreTrainedConfig.from_pretrained(pretrained_path)
     dataset = LeRobotDataset(repo_id="dataset", root=dataset_path)
 

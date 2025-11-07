@@ -4,7 +4,7 @@ from typing import Callable, Dict, Optional
 
 import tqdm
 
-from lerobot.lerobot.common.datasets.lerobot_dataset import LeRobotDataset
+from lerobot.common.datasets.lerobot_dataset import LeRobotDataset
 
 
 def transform_dataset(  # noqa: C901

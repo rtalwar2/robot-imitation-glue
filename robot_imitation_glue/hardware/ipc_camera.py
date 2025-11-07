@@ -127,7 +127,6 @@ class RGBCameraSubscriber(RGBCamera):
 
             self._timestamp = frame.timestamp[0].item()
 
-
 class CameraFactory:
     def create_camera():
         # return OpenCVVideoCapture(resolution=(1920, 1080),  fps=30,intrinsics_matrix=np.eye(3))

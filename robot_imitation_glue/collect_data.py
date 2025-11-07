@@ -83,9 +83,7 @@ def collect_data(  # noqa: C901
     abs_pose_to_policy_action: converter_callable = None,
 ):
     assert env.ACTION_SPEC == teleop_agent.ACTION_SPEC
-
     rr.init("robot_imitation_glue", spawn=True)
-
     state = State()
     event = Event()
     listener = init_keyboard_listener(event, state)
@@ -157,7 +155,7 @@ def collect_data(  # noqa: C901
             2,
         )
         rr.log("wrist_image", rr.Image(vis_img, rr.ColorModel.RGB))
-        # rr.log("wrist_image", rr.Image(observation["wrist_image"], rr.ColorModel.RGB))
+        rr.log("wrist_image original", rr.Image(observation["wrist_image_original"], rr.ColorModel.RGB))
         rr.log("spectogram", rr.Image(observation["spectogram_image"], rr.ColorModel.RGB))
         # rr.log("spectogrambgr", rr.Image(observation["spectogram_image"], rr.ColorModel.BGR))
         # print(f"wrist image shape: {observation['wrist_image'].shape}")

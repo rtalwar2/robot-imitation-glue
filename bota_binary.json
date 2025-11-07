@@ -1,0 +1,34 @@
+{
+    "driver_config": {
+        "product_name": "BFT-SENS-SER-M8",
+        "serial_number": "SN000897",
+        "communication_interface_name": "Bota_Binary",
+        "communication_interface_params": {
+            "com_port": "/dev/serial/by-id/usb-FTDI_FT232R_USB_UART_AV0KIBK2-if00-port0",
+            "baudrate": 921600
+        },
+        "sensor_operation_params": {
+            "app_mode": 1,
+            "app_submode": 0,
+            "wrench_offset": {
+                "fx": 0.0,
+                "fy": 0.0,
+                "fz": 0.0,
+                "tx": 0.0,
+                "ty": 0.0,
+                "tz": 0.0
+            },
+           "temperature_coefficients": {
+                "fx": 0.0,
+                "fy": 0.0,
+                "fz": 0.0,
+                "tx": 0.0,
+                "ty": 0.0,
+                "tz": 0.0
+            }
+        },
+        "driver_operation_params": {
+            "runtime_verbosity": true
+        }
+    }
+ }

@@ -6,7 +6,7 @@ import numpy as np  # Missing import for np
 from robot_imitation_glue.agents.gello.gello_agent import DynamixelConfig
 from scipy.spatial.transform import Rotation as R
 
-from robot_imitation_glue.agents.spacemouse_agent import SpaceMouseAgent
+# from robot_imitation_glue.agents.spacemouse_agent import SpaceMouseAgent
 from robot_imitation_glue.collect_data import collect_data, teleoperate
 from robot_imitation_glue.dataset_recorder import LeRobotDatasetRecorder
 from robot_imitation_glue.uR3station.robot_env import UR3eStation
@@ -62,7 +62,7 @@ if __name__ == "__main__":
 
     env = UR3eStation(with_instrumentation=True)
 
-    dataset_name = "test_5_episodes"
+    dataset_name = "height_one_part2"
 
     config = DynamixelConfig(
         joint_ids=(1, 2, 3, 4, 5, 6),
@@ -86,7 +86,7 @@ if __name__ == "__main__":
         use_videos=True,
     )
 
-    # print(dataset_recorder.state_keys)
+    print(dataset_recorder.state_keys)
 
     collect_data(
         env,

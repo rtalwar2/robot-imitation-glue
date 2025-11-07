@@ -20,19 +20,21 @@ def replay_episode(
     episode_start_idx = episode_indices["from"][episode_idx].item()
     episode_to_idx = episode_indices["to"][episode_idx].item()
 
-    dataset_initial_image = dataset[episode_start_idx][dataset_image_key]
-    dataset_initial_action = dataset[episode_start_idx]["action"].cpu().numpy()
-    initial_robot_pose, initial_gripper = action_to_env_converter(
-        env.get_robot_pose_se3(), env.get_gripper_opening(), dataset_initial_action
+    # dataset_initial_image = dataset[episode_start_idx][dataset_image_key]
+    action = dataset[episode_start_idx]["action"].cpu().numpy()
+    # initial_robot_pose, initial_gripper = action_to_env_converter(
+    #     env.get_robot_pose_se3(), env.get_gripper_opening(), dataset_initial_action
+    # )
+    input(f"Press Enter to move robot to initial pose \n {initial_robot_pose}")
+    env.act(
+        robot_joints=action[0:6],
+        gripper_pose=action[-1],
+        timestamp=time.time() +  1.0 / fps,
     )
 
-    input(f"Press Enter to move robot to initial pose \n {initial_robot_pose}")
-    env.move_robot_to_tcp_pose(initial_robot_pose)
-    env.move_gripper(initial_gripper)
-
     # convert torch image to numpy image
-    dataset_initial_image = dataset_initial_image.cpu().numpy()
-    dataset_initial_image = dataset_initial_image.transpose(1, 2, 0).astype(np.uint8)
+    # dataset_initial_image = dataset_initial_image.cpu().numpy()
+    # dataset_initial_image = dataset_initial_image.transpose(1, 2, 0).astype(np.uint8)
 
     # while True:
     #     img = env.get_observations()[image_key]
@@ -55,11 +57,11 @@ def replay_episode(
         obs = env.get_observations()
         # print(f"current obs = {obs}")
         # print(f"dataset obs = {dataset[i]}")
-        robot_pose, gripper = action_to_env_converter(env.get_robot_pose_se3(), env.get_gripper_opening(), action)
-        logger.debug(f"target robot pose = {robot_pose}")
-        logger.debug(f"current robot pose = {env.get_robot_pose_se3()}")
+        # robot_pose, gripper = action_to_env_converter(env.get_robot_pose_se3(), env.get_gripper_opening(), action)
+        logger.debug(f"target robot pose = {action}")
+        logger.debug(f"current robot pose = {env.get_joint_configuration()}")
         logger.debug(f"current state observation = {obs['state']}")
-        env.act(robot_pose, gripper, time.time() + duration)
+        env.act(action[0:6], action[-1], time.time() + duration)
         time.sleep(duration)
 
     print("replay finished")

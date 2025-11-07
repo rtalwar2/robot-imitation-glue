@@ -71,7 +71,7 @@ python lerobot/lerobot/scripts/merge.py --sources datasets_tmp/clothes-hanger-v3
 
 python lerobot/lerobot/scripts/train.py --config_path=robot_imitation_glue/ur5station/lerobot_train/...config.json
 
-python ./robot-imitation-glue/lerobot/lerobot/scripts/train.py --config_path=robot-imitation-glue/robot_imitation_glue/uR3station/lerobot_train/pick-block-diffusion-config.json
+python lerobot/lerobot/scripts/train.py --config_path=robot_imitation_glue/uR3station/lerobot_train/pick-block-diffusion-config.json
 
 (extra info in lerobot > examples > advanced > 4_train_policy_with_script)
 
@@ -88,3 +88,5 @@ robot_imitation_glue > ur5station > eval_diffusion_lerobot.py
 
 
 hf upload ramen-noodels/test_5_episodes ./datasets/test_5_episodes --repo-type=dataset
+
+hf download ramen-noodels/test_5_episodes --repo-type dataset --local-dir datasets/test_5_episodes

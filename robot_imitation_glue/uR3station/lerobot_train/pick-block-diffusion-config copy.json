@@ -112,12 +112,12 @@
         "drop_n_last_frames": 7,
         "vision_backbone": "resnet18",
         "crop_shape": [
-            224,
-            224
+            64,
+            64
         ],
         "crop_is_random": false,
-        "pretrained_backbone_weights": null,
-        "use_group_norm": true,
+        "pretrained_backbone_weights": "IMAGENET1K_V1",
+        "use_group_norm": false,
         "spatial_softmax_num_keypoints": 32,
         "use_separate_rgb_encoder_per_camera": true,
         "down_dims": [
@@ -149,7 +149,7 @@
         "scheduler_name": "cosine",
         "scheduler_warmup_steps": 500
     },
-    "job_name": "red_button_overfit_groupnorm_nocrop",
+    "job_name": "red_button_overfit_batchnorm_pretrained",
     "resume": false,
     "seed": 2025,
     "num_workers": 8,

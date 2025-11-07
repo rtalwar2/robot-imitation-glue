@@ -17,6 +17,7 @@ from airo_spatial_algebra.se3 import SE3Container, normalize_so3_matrix
 
 from robot_imitation_glue.base import BaseEnv
 from robot_imitation_glue.hardware.ipc_btn import BTNSubscriber
+from robot_imitation_glue.hardware.ipc_ft import FTSubscriber
 from robot_imitation_glue.hardware.ipc_camera import (
     RGBCameraPublisher,
     RGBCameraSubscriber,
@@ -99,6 +100,9 @@ class UR3eStation(BaseEnv):
             logger.info("creating button subscriber")
             self.button_subscriber = BTNSubscriber("BTN")
 
+        logger.info("creating FT subscriber")
+        self.ft_subscriber = FTSubscriber("FT")
+
         logger.info("creating spectogram subscriber")
         self.spectogram_subscriber = SpectrogramSubscriber("MelSpectrogram")
         # set up robot and gripper
@@ -145,7 +149,9 @@ class UR3eStation(BaseEnv):
         robot_state = self.get_robot_pose_euler().astype(np.float32)
         gripper_state = self.get_gripper_opening().astype(np.float32)
         joints = self.robot.get_joint_configuration().astype(np.float32)
-        ft = np.array(self.robot.rtde_receive.getActualTCPForce()).astype(np.float32)
+        # ft = np.array(self.robot.rtde_receive.getActualTCPForce()).astype(np.float32)
+        ft = self.ft_subscriber.get_FT()
+
         # TODO: resize images (but still include the original?)
 
         # resize wrist images to 224x224
@@ -158,7 +164,7 @@ class UR3eStation(BaseEnv):
 
         state = np.concatenate((joints, gripper_state), axis=0)
         obs_dict = {
-            # "wrist_image_original": wrist_image,
+            "wrist_image_original": wrist_image,
             # "scene_image_original": scene_image,
             "wrist_image": wrist_image_resized,
             # "scene_image": scene_image_resized,
@@ -221,6 +227,15 @@ class UR3eStation(BaseEnv):
     def move_robot_to_tcp_pose(self, pose):
         """move robot to a given SE3 tcp pose"""
         self.robot.move_to_tcp_pose(pose)
+
+    def move_robot_to_joint_config(self, robot_joints,gripper_width):
+        """move robot to a given joint configuration"""
+        logger.debug(f"Moving robot to joint positions {robot_joints}")
+
+        logger.debug(f"Moving gripper to {gripper_width}")
+        self.robot.move_to_joint_configuration(robot_joints)
+        self.gripper._set_target_width(gripper_width)
+
 
     def move_gripper(self, width):
         """move gripper to a given width"""

@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from lerobot.lerobot.common.datasets.lerobot_dataset import LeRobotDataset
+from lerobot.common.datasets.lerobot_dataset import LeRobotDataset
 import numpy as np
 import torch
 
