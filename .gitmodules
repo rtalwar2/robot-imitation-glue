@@ -7,6 +7,6 @@
 [submodule "lerobot"]
 	path = lerobot
 	url = https://github.com/tlpss/lerobot.git
-[submodule "ur_ikfast"]
-	path = ur_ikfast
-	url = https://github.com/cambel/ur_ikfast.git
+[submodule "ast"]
+	path = ast
+	url = https://github.com/tlpss/ast.git

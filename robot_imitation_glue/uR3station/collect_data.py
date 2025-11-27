@@ -62,7 +62,7 @@ if __name__ == "__main__":
 
     env = UR3eStation(with_instrumentation=True)
 
-    dataset_name = "height_one_part2"
+    dataset_name = "delme5"
 
     config = DynamixelConfig(
         joint_ids=(1, 2, 3, 4, 5, 6),
@@ -75,31 +75,31 @@ if __name__ == "__main__":
     start_joints = np.concatenate((env.robot.get_joint_configuration(),env.get_gripper_opening()),axis=0)
     agent = GelloAgent(config, "/dev/serial/by-id/usb-FTDI_USB__-__Serial_Converter_FT792AL6-if00-port0",start_joints)
 
-    if not os.path.exists("datasets"):
-        os.makedirs("datasets")
-    dataset_recorder = LeRobotDatasetRecorder(
-        example_obs_dict=env.get_observations(),
-        example_action=np.zeros((7,), dtype=np.float32),
-        root_dataset_dir=Path(f"datasets/{dataset_name}"),
-        dataset_name=dataset_name,
-        fps=10,
-        use_videos=True,
-    )
-
-    print(dataset_recorder.state_keys)
-
-    collect_data(
-        env,
-        agent,
-        dataset_recorder,
-        10,
-        delta_action_to_abs_se3_converter,
-        abs_se3_to_relative_policy_action_converter,
-    )
-    # teleoperate(
-    #     env,
-    #     agent
+    # if not os.path.exists("datasets"):
+    #     os.makedirs("datasets")
+    # dataset_recorder = LeRobotDatasetRecorder(
+    #     example_obs_dict=env.get_observations(),
+    #     example_action=np.zeros((7,), dtype=np.float32),
+    #     root_dataset_dir=Path(f"datasets/{dataset_name}"),
+    #     dataset_name=dataset_name,
+    #     fps=10,
+    #     use_videos=True,
     # )
+
+    # print(dataset_recorder.state_keys)
+
+    # collect_data(
+    #     env,
+    #     agent,
+    #     dataset_recorder,
+    #     10,
+    #     delta_action_to_abs_se3_converter,
+    #     abs_se3_to_relative_policy_action_converter,
+    # )
+    teleoperate(
+        env,
+        agent
+    )
 
     env.close()
     agent.close()

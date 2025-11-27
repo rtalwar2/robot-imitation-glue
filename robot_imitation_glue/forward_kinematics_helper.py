@@ -75,7 +75,7 @@ def forward_kinematics_ur3e(q):
     TransRotZ[0, 1] = -np.sin(q[5])
     TransRotZ[1, 0] = np.sin(q[5])
     TransRotZ[1, 1] = np.cos(q[5])
-    TransRotZ[2, 3] = 0.0921
+    TransRotZ[2, 3] = 0.0921 + 0.23
     TransRotX = np.identity(4)
     TransRotX[1, 1] = np.cos(0.)
     TransRotX[1, 2] = -np.sin(0.)

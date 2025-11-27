@@ -1,10 +1,10 @@
 {
     "dataset": {
-        "repo_id": "red_button_overfit_resized",
-        "root": "datasets/red_button_overfit_resized/",
+        "repo_id": "ground_resized",
+        "root": "datasets/ground_resized/",
         "episodes": null,
         "image_transforms": {
-            "enable": false,
+            "enable": true,
             "max_num_transforms": 3,
             "random_order": false,
             "tfs": {
@@ -78,16 +78,16 @@
                 "type": "VISUAL",
                 "shape": [
                     3,
-                    64,
-                    64
+                    224,
+                    224
                 ]
             },
             "observation.images.spectogram_image": {
                 "type": "VISUAL",
                 "shape": [
                     3,
-                    64,
-                    64
+                    224,
+                    224
                 ]
             },
             "observation.state": {
@@ -149,16 +149,16 @@
         "scheduler_name": "cosine",
         "scheduler_warmup_steps": 500
     },
-    "job_name": "red_button_overfit_groupnorm_nocrop",
+    "job_name": "train_with_instrumentation_150k",
     "resume": false,
     "seed": 2025,
     "num_workers": 8,
     "batch_size": 32,
-    "steps": 10000,
+    "steps": 150000,
     "eval_freq": 0,
     "log_freq": 200,
     "save_checkpoint": true,
-    "save_freq": 2000,
+    "save_freq": 30000,
     "use_policy_training_preset": true,
     "optimizer": {
         "type": "adam",

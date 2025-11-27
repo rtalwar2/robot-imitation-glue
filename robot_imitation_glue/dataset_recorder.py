@@ -78,7 +78,7 @@ class LeRobotDatasetRecorder(BaseDatasetRecorder):
                 features[key] = {"dtype": str(value.dtype), "shape": shape, "names": None}
             elif len(shape) == 3:
                 if not shape[0] == 3:
-                    # not hannel first! reorder shape
+                    # not channel first! reorder shape
                     shape = (shape[2], shape[0], shape[1])
                 if use_videos:
                     features[key] = {"dtype": "video", "names": ["channel", "height", "width"], "shape": shape}

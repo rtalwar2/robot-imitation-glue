@@ -23,7 +23,7 @@ from robot_imitation_glue.hardware.ipc_camera import (
     RGBCameraSubscriber,
     initialize_ipc,
 )
-from robot_imitation_glue.hardware.ipc_mic import SpectrogramSubscriber
+from robot_imitation_glue.hardware.ipc_mic import  SpectrogramSubscriberKaldi
 
 # env consists of 2 realsense cameras and UR3e robot
 
@@ -95,7 +95,6 @@ class UR3eStation(BaseEnv):
         # wait for first images
         time.sleep(2)
 
-
         if self.with_instrumentation:
             logger.info("creating button subscriber")
             self.button_subscriber = BTNSubscriber("BTN")
@@ -104,14 +103,14 @@ class UR3eStation(BaseEnv):
         self.ft_subscriber = FTSubscriber("FT")
 
         logger.info("creating spectogram subscriber")
-        self.spectogram_subscriber = SpectrogramSubscriber("MelSpectrogram")
+        self.spectogram_subscriber = SpectrogramSubscriberKaldi("KaldiSpectrogram")
         # set up robot and gripper
         logger.info("connecting to gripper.")
         self.gripper = Robotiq2F85(ROBOT_IP)
 
         logger.info("connecting to robot.")
         self.robot = URrtde(ROBOT_IP, URrtde.UR3E_CONFIG, gripper=self.gripper)
-        
+
         # set up additional sensors if needed.
 
         # rr.init("ur3e-station",spawn=True)
@@ -143,7 +142,7 @@ class UR3eStation(BaseEnv):
     def get_observations(self):
 
         wrist_image = self._wrist_camera_subscriber.get_rgb_image_as_int()
-        spectogram_image = self.spectogram_subscriber.get_spectogram()
+        spectogram_rgb_image,spectogram_values = self.spectogram_subscriber.get_spectogram()
         # print(spectogram_image)
         # scene_image = self._scene_camera_subscriber.get_rgb_image_as_int()
         robot_state = self.get_robot_pose_euler().astype(np.float32)
@@ -168,12 +167,13 @@ class UR3eStation(BaseEnv):
             # "scene_image_original": scene_image,
             "wrist_image": wrist_image_resized,
             # "scene_image": scene_image_resized,
-            "spectogram_image" :spectogram_image,
-            "state":state,
+            "spectogram_image": spectogram_rgb_image,
+            "spectogram_values": spectogram_values,
+            "state": state,
             "robot_pose": robot_state,
             "gripper_state": gripper_state,
             "joints": joints,
-            "ft":ft
+            "ft": ft,
         }
 
         if self.with_instrumentation:
@@ -189,7 +189,26 @@ class UR3eStation(BaseEnv):
 
         return obs_dict
 
+    def act_deltaz(self, delta_z, robot_pose_se3, timestamp):
+        # we are working with delta z position
+        # move robot to target pose
+        current_time = time.time()
+        duration = timestamp - current_time
+        if duration < 0:
+            logger.warning("Action duration is negative, setting it to 0")
+            duration = 0
+        logger.debug(
+            f"Moving robot down in z axis {delta_z} m with duration {duration}"
+        )
+
+        robot_pose_se3[2, 3] -= delta_z
+        self.robot.servo_to_tcp_pose(robot_pose_se3, duration)
+        self.gripper._set_target_width(0)
+        return
+
     def act(self, robot_joints, gripper_pose, timestamp):
+
+        # normal joint space
 
         if isinstance(gripper_pose, np.ndarray):
             gripper_pose = gripper_pose[0].item()
@@ -228,14 +247,13 @@ class UR3eStation(BaseEnv):
         """move robot to a given SE3 tcp pose"""
         self.robot.move_to_tcp_pose(pose)
 
-    def move_robot_to_joint_config(self, robot_joints,gripper_width):
+    def move_robot_to_joint_config(self, robot_joints, gripper_width):
         """move robot to a given joint configuration"""
         logger.debug(f"Moving robot to joint positions {robot_joints}")
 
         logger.debug(f"Moving gripper to {gripper_width}")
         self.robot.move_to_joint_configuration(robot_joints)
         self.gripper._set_target_width(gripper_width)
-
 
     def move_gripper(self, width):
         """move gripper to a given width"""

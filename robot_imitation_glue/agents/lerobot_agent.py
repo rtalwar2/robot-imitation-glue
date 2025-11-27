@@ -60,10 +60,10 @@ class LerobotAgent(BaseAgent):
         observation = {k: v.to(self.device) for k, v in observation.items()}
         with torch.no_grad():
             time_start = time.time()
-            action = self.policy.select_action(observation)
+            action,used_images ,attn_maps= self.policy.select_action(observation)
             time_end = time.time()
             logger.info(f"Lerobot agent inference took {((time_end - time_start)*1000):.2f} ms")
-        return action.squeeze(0).cpu().numpy()
+        return action.squeeze(0).cpu().numpy(),used_images,attn_maps
 
     def reset(self):
         self.policy.reset()

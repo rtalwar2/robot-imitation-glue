@@ -1,4 +1,5 @@
 import numpy as np
+from regex import D
 from robot_imitation_glue.uR3station.robot_env import UR3eStation
 import torch
 import cv2
@@ -11,33 +12,26 @@ from robot_imitation_glue.agents.lerobot_agent import LerobotAgent, make_lerobot
 from robot_imitation_glue.dataset_recorder import LeRobotDatasetRecorder
 from robot_imitation_glue.eval_agent import eval
 
+image_size=224
 
 if __name__ == "__main__":
-    checkpoint_path = "/home/rtalwar/robot-imitation-glue/outputs/train/2025-11-05/11-52-55_red_button_overfit_batchnorm_pretrained/checkpoints/last/pretrained_model"
+    checkpoint_path = "/home/rtalwar/robot-imitation-glue/outputs/train/2025-11-17/15-52-29_rgb_joints_no_instrumentation_bottom/checkpoints/last/pretrained_model"
     train_dataset_path = (
-        "/home/rtalwar/robot-imitation-glue/datasets/red_button_overfit_resized"
+        "/home/rtalwar/robot-imitation-glue/datasets/rgb_joints_no_instrumentation_bottom_resized"
     )
     eval_scenarios_dataset_path = train_dataset_path
 
-    eval_dataset_name = "red_button_overfit_batchnorm_groupnorm_nocrop_10K_"
+    eval_dataset_name = "eval_rgb_joints23446598d7445684743rtyjtyjjy94"
 
     def preprocessor(obs_dict):
         spectogram_image = obs_dict["spectogram_image"]
         wrist_image = obs_dict["wrist_image"]
         state = obs_dict["state"]
         button = obs_dict["btn_state"]
-        state = np.concatenate((state,button))
-
-        resized_wrist_image = np.clip(
-            cv2.resize(np.array(wrist_image), (64, 64), interpolation=cv2.INTER_AREA),
-            0.0,
-            1.0,
-        )
-        resized_spectogram_image = np.clip(
-            cv2.resize(np.array(spectogram_image), (64, 64), interpolation=cv2.INTER_AREA),
-            0.0,
-            1.0,
-        )
+        # state = np.concatenate((state,button))
+        # state = np.zeros(state.shape,dtype=np.float32)
+        resized_wrist_image = cv2.resize(np.array(wrist_image), (image_size, image_size), interpolation=cv2.INTER_AREA)
+        resized_spectogram_image = cv2.resize(np.array(spectogram_image), (image_size, image_size), interpolation=cv2.INTER_AREA)
 
         state = torch.tensor(state).float().unsqueeze(0)
         spectogram_image = torch.tensor(resized_spectogram_image).float() / 255.0

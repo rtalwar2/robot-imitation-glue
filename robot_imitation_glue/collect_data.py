@@ -162,6 +162,7 @@ def collect_data(  # noqa: C901
         # print(f"spectogram image shape: {observation['spectogram_image'].shape}")
         # rr.log("scene_image", rr.Image(observation["scene_image"], rr.ColorModel.RGB))
         rr.log("joints", rr.TextLog(str(observation["joints"])))
+        rr.log("btn_state", rr.Scalar(float(observation["btn_state"])))
         # if paused, do not collect teleop or execute action
         if state.is_paused:
             time.sleep(0.1)

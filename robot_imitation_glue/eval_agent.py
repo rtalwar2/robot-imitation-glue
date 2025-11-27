@@ -73,6 +73,43 @@ def init_keyboard_listener(event: Event, state: State):
 
     return listener
 
+import torch
+def overlay_all_keypoints(image, attn_tensor, alpha=0.5):
+    """
+    image_tensor: (C, H, W) torch tensor, values 0–1 or 0–255
+    attn_tensor:  (K, h, w) torch tensor, typically (32,7,7)
+    alpha: overlay transparency
+    """
+
+    # Convert image to uint8
+    # if image.max() <= 1.0:
+    #     image = (image * 255).astype(np.uint8)
+    # else:
+    #     image = image.astype(np.uint8)
+
+    H_img, W_img = image.shape[:2]
+
+    # Upsample all heatmaps at once
+    heat = 1-attn_tensor.unsqueeze(0)  # (1, K, 7, 7)
+    # heat = attn_tens|or
+    heat_upsampled = torch.nn.functional.interpolate(
+        heat, size=(H_img, W_img), mode='bilinear', align_corners=False
+    )[0]  # (K, H, W)
+
+    # Combine all into one heatmap by summing
+    combined = heat_upsampled.sum(dim=0).cpu().numpy()  # (H, W)
+
+    # Normalize to 0–255
+    combined_norm = (combined - combined.min()) / (combined.max() - combined.min() + 1e-6)
+    combined_uint8 = (combined_norm * 255).astype(np.uint8)
+
+    # Colorize using a heatmap (JET)
+    combined_color = (cv2.applyColorMap(combined_uint8, cv2.COLORMAP_JET)/255.0).astype(np.float32)
+
+    # Overlay the heatmap onto the RGB image
+    overlay = cv2.addWeighted(image, 1 - alpha, combined_color, alpha, 0)
+
+    return image,overlay, combined_uint8, combined_color
 
 def eval(  # noqa: C901
     env: BaseEnv,
@@ -116,7 +153,9 @@ def eval(  # noqa: C901
 
     control_period = 1 / fps
     num_rollouts = recorder.n_recorded_episodes
-
+    action = teleop_agent.get_action(env.get_observations())
+    gripper_target = (1-action[-1])*0.085
+    env.act(action[0:6],gripper_target,time.time() +5)
     while not state.is_stopped:
 
         initial_scene_image = None
@@ -158,7 +197,6 @@ def eval(  # noqa: C901
         # first move slowly to the initial pose of the teleop device
         action = teleop_agent.get_action(env.get_observations())
         gripper_target = (1-action[-1])*0.085
-        # robot_pose, gripper_state = teleop_to_pose_converter(target_pose, target_gripper_state, action)
         env.act(action[0:6],gripper_target,time.time() + control_period)
         logger.debug("robot moved to teleop pose")
         if initial_scene_image is not None:
@@ -171,7 +209,7 @@ def eval(  # noqa: C901
 
             observations = env.get_observations()
 
-            vis_image = observations[env_observation_image_key]
+            vis_image = observations[env_observation_image_key].copy()
             spectogram_image = observations[env_spectogram_key]
             rr.log("scene", rr.Image(vis_image))
             rr.log("spectogram", rr.Image(spectogram_image))
@@ -215,7 +253,7 @@ def eval(  # noqa: C901
 
             observations = env.get_observations()
 
-            vis_image = observations[env_observation_image_key]
+            vis_image = observations[env_observation_image_key].copy()
             spectogram_image = observations[env_spectogram_key]
 
             ## print number of episodes to image
@@ -228,10 +266,27 @@ def eval(  # noqa: C901
                 (255, 0, 0),
                 1,
             )
+            
             rr.log("scene", rr.Image(vis_image))
             rr.log("spectogram", rr.Image(spectogram_image))
+            action, used_images,attn_maps = policy_agent.get_action(observations)
 
-            action = policy_agent.get_action(observations)
+            if used_images is not None:
+                # used_images shape: [batch, n_obs_steps, C, H, W]
+                # assuming batch size 1:
+                obs_imgs = used_images[0]          # shape [2, C, H, W]
+
+                for i, img in enumerate(obs_imgs):
+                    # convert tensor → numpy and reshape to HWC
+                    img = img.squeeze(0)  # remove batch dim -> [C, H, W]
+
+                    img_np = img.cpu().numpy().transpose(1, 2, 0)
+
+                    rr.log(f"prediction_inputs/obs_{i}/raw", rr.Image(img_np))
+                    image, overlay, heat_gray, heat_color = overlay_all_keypoints(img_np, attn_maps[0][0][i],0.7)
+                    rr.log(f"prediction_inputs/obs_{i}/attention", rr.Image(overlay))
+
+
             logger.debug(f"policy action: {action}")
             
             X_B_TCP_virtual = forward_kinematics_ur3e(action[0:6])
@@ -250,7 +305,7 @@ def eval(  # noqa: C901
                 rr.LineStrips3D(np.array(tool_positions, dtype=np.float32)[None, :, :]),
             )
 
-            next_height = X_B_TCP_virtual[2,3]-0.19
+            next_height = X_B_TCP_virtual[2,3]
             if next_height<0.01:
                 print(f"emergency break, almost hitting table with next height:{next_height}")
                 return
@@ -280,6 +335,9 @@ def eval(  # noqa: C901
                 recorder.save_episode()
                 event.clear()
                 logger.info(f"Saved episode {recorder.n_recorded_episodes}")
+                action = teleop_agent.get_action(env.get_observations())
+                gripper_target = (1-action[-1])*0.085
+                env.act(action[0:6],gripper_target,time.time() +5)
 
 
 if __name__ == "__main__":
@@ -318,6 +376,6 @@ if __name__ == "__main__":
         dataset_recorder,
         mock_agent_to_pose_converter,
         mock_agent_to_pose_converter,
-        fps=2,
+        fps=10,
         eval_dataset=dataset,
     )
