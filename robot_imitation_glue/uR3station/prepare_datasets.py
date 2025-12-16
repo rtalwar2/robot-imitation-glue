@@ -19,13 +19,13 @@ def features_transform(features):
     # features["observation.state"]["shape"] = (8,)
     features["observation.images.wrist_image"] = features.pop("wrist_image")
     # features["observation.images.spectogram_image"] = features.pop("spectogram_image")
-    features["observation.images.wrist_image"]["shape"] = (3, image_size, image_size)
+    features["observation.images.wrist_image"]["shape"] = (3, 240, 320)
     # features["observation.images.spectogram_image"]["shape"] = (3, image_size, image_size)
-    features["action"]["shape"] = (1,) #deltaz
+    features["action"]["shape"] = (3,) #deltaz
     features.pop("wrist_image_original")
     features.pop("spectogram_image")  # rgb only
-    # features["observation.images.spectogram_values"] = features.pop("spectogram_values")  # rgb only
-    features.pop("spectogram_values")
+    features["observation.audio.spectogram_values"] = features.pop("spectogram_values")  # rgb only
+    # features.pop("spectogram_values")
     print("processed features:")
     print(features)
     return features
@@ -48,18 +48,16 @@ def joints_frame_transform(frame):
     # new_frame["observation.state"] = state
     # new_frame["observation.state"] = np.concatenate((state,button))
     new_frame["observation.state"] = np.array([0.0],dtype=np.float32)
+    # new_frame["observation.state"] = button
     new_frame["action"] = np.array(frame["action"]).astype(np.float64)
-
+    # resized_wrist_image = wrist_image
     resized_wrist_image = cv2.resize(
-        np.array(wrist_image), (image_size, image_size), interpolation=cv2.INTER_AREA
-    )
+        np.array(wrist_image),(320, 240))
     resized_spectogram_image = cv2.resize(
         np.array(spectogram_image),
-        (image_size, image_size),
-        interpolation=cv2.INTER_AREA,
-    )
+        (image_size, image_size))
     # new_frame["observation.images.spectogram_image"] = resized_spectogram_image
-    # new_frame["observation.images.spectogram_values"] = spectogram_values_image
+    new_frame["observation.audio.spectogram_values"] = spectogram_values_image
     new_frame["observation.images.wrist_image"] = resized_wrist_image
 
     return new_frame
@@ -68,11 +66,11 @@ l = [25,27,30,33,37,45,50,52,65,80,82,85,89,98]
 l_bottom = [x for x in range(0,201) if x>=100 or x in l]
 
 delta_z_automated_final_2=[3,6,7,9,10,11,19,20,22,24,26,28,29,31,32,35,36,37,39,40,42,43,45,46,50,52,54,55,56,57,60,62,64,65,67,68,69,70,70,72,73,74,75,76,77,78,79]
-
+# for z automated final2 dynamic [2,3,14,18,23,31,34,35,36,37,38,39,40,41,42,43,44,43,45,46,50]
 transform_dataset(
-    root_dir="/home/rtalwar/robot-imitation-glue/datasets/delta_z_automated_final2_dynamic",
-    new_root_dir="/home/rtalwar/robot-imitation-glue/datasets/delta_z_dynamic_rgb",
+    root_dir="/home/rtalwar/robot-imitation-glue/datasets/delta_xyz_final",
+    new_root_dir="/home/rtalwar/robot-imitation-glue/datasets/delta_xyz_final_rgb_audio",
     transform_fn=joints_frame_transform,
     transform_features_fn=features_transform,
-    episodes_to_drop=[2,3,14,18,23,31,34,35,36,37,38,43,45,50],
+    episodes_to_drop=[92],
 )

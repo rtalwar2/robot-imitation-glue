@@ -8,3 +8,5 @@
 **.pyc
 datasets/
 outputs/
+models/
+ast_delta_z/

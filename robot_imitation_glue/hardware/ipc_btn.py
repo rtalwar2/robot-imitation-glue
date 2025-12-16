@@ -24,4 +24,4 @@ class BTNSubscriber:
         samples = self._reader.take()
         if len(samples) != 0:
             self._internal_state = np.array([samples[0].value],"float32")  # update internal state
-        return self._internal_state
+        return self._internal_state.copy()

@@ -7,6 +7,10 @@ Proprioception as robot pose (euler angles) in robot base frame and gripper widt
 
 import time
 
+
+import torch
+import numpy as np
+from transformers import ASTForAudioClassification
 import cv2
 import loguru
 import numpy as np
@@ -22,6 +26,7 @@ from robot_imitation_glue.hardware.ipc_camera import (
     RGBCameraPublisher,
     RGBCameraSubscriber,
     initialize_ipc,
+    DepthCameraSubscriber
 )
 from robot_imitation_glue.hardware.ipc_mic import  SpectrogramSubscriberKaldi
 
@@ -29,6 +34,7 @@ from robot_imitation_glue.hardware.ipc_mic import  SpectrogramSubscriberKaldi
 
 WRIST_REALSENSE_SERIAL = "925322060348"
 WRIST_CAM_RGB_TOPIC = "wrist_rgb"
+WRIST_CAM_DEPTH_TOPIC = "wrist_depth"
 WRIST_CAM_RESOLUTION_TOPIC = "wrist_resolution"
 
 SCENE_REALSENSE_SERIAL = "231122072220"
@@ -55,15 +61,17 @@ class UR3eStation(BaseEnv):
     ACTION_SPEC = None
     PROPRIO_OBS_SPEC = None
 
-    def __init__(self, with_instrumentation=False):
+    def __init__(self, with_instrumentation=False,with_spectogram_model=True):
         # set up cameras
         initialize_ipc()
         self.with_instrumentation = with_instrumentation
+        self.with_spectogram_model = with_spectogram_model
         # Put from here ...
         logger.info("Creating wrist camera publisher.")
         self._wrist_camera_publisher = RGBCameraPublisher(
             CameraFactory.create_wrist_camera,
             WRIST_CAM_RGB_TOPIC,
+            WRIST_CAM_DEPTH_TOPIC,
             WRIST_CAM_RESOLUTION_TOPIC,
             100,
         )
@@ -73,6 +81,11 @@ class UR3eStation(BaseEnv):
         self._wrist_camera_subscriber = RGBCameraSubscriber(
             WRIST_CAM_RESOLUTION_TOPIC,
             WRIST_CAM_RGB_TOPIC,
+        )
+        logger.info("Creating wrist depth camera subscriber.")
+        self._wrist_depth_camera_subscriber = DepthCameraSubscriber(
+            WRIST_CAM_RESOLUTION_TOPIC,
+            WRIST_CAM_DEPTH_TOPIC,
         )
         # ... till here in comments if don't want to use the wrist camera
 
@@ -114,6 +127,67 @@ class UR3eStation(BaseEnv):
         # set up additional sensors if needed.
 
         # rr.init("ur3e-station",spawn=True)
+        # ---------------------------------------------------------
+        # 1. Configuration & Constants
+        # ---------------------------------------------------------
+        if self.with_spectogram_model:
+            # Path to your saved model (usually the checkpoint folder with best metrics)
+            # e.g., "./ast_delta_z/checkpoint-1900" or just "./ast_delta_z" if you saved the final model there
+            MODEL_PATH = "/home/rtalwar/robot-imitation-glue/ast_delta_z/checkpoint-340" 
+
+            # MUST match the values printed during training
+            self.TRAIN_MEAN = 0.6198999470846517
+            self.TRAIN_STD  = 0.06112271215561439
+
+            # Define labels (Update these to match your actual classes)
+            ID2LABEL = {
+                0: "Class_0",
+                1: "Class_1"
+            }
+
+            # Select device
+            self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            print(f"Inference running on: {self.device}")
+
+
+            # ---------------------------------------------------------
+            # 2. Load Model
+            # ---------------------------------------------------------
+
+            # The config saved in MODEL_PATH already contains the customized 
+            # max_length (298) and architecture changes.
+            self.model = ASTForAudioClassification.from_pretrained(MODEL_PATH)
+            self.model.to(self.device)
+            self.model.eval() # Set to evaluation mode (freezes Dropout, Batchnorm, etc.)
+
+            print("Model loaded successfully.")
+
+
+            # ---------------------------------------------------------
+            # 3. Preprocessing Function
+            # ---------------------------------------------------------
+
+    def preprocess_spectrogram(self,spectrogram_array):
+        """
+        Prepares a raw numpy spectrogram for the AST model.
+        Expected Input Shape: (Time, Freq) -> e.g., (298, 128)
+        """
+        # 1. Convert to numpy if not already
+        spec = np.array(spectrogram_array, dtype=np.float32)
+
+        # 2. Apply the EXACT same normalization as training
+        # norm(x) = (x - mean) / (std * 2)
+        spec_normalized = (spec - self.TRAIN_MEAN) / (self.TRAIN_STD * 2)
+
+        # 3. Convert to PyTorch Tensor
+        tensor = torch.tensor(spec_normalized)
+
+        # 4. Add Batch Dimension if missing: (298, 128) -> (1, 298, 128)
+        if tensor.ndim == 2:
+            tensor = tensor.unsqueeze(0)
+            
+        return tensor.to(self.device)
+
 
     def get_joint_configuration(self):
         return self.robot.get_joint_configuration()
@@ -139,6 +213,13 @@ class UR3eStation(BaseEnv):
         # target_pose is a 4x4 homogeneous transformation matrix
         self.robot.servo_to_tcp_pose()
 
+    def get_depth_map(self):
+        return self._wrist_depth_camera_subscriber.get_depth_map()
+
+    def get_camera_intrinsics(self):
+        self._wrist_camera_subscriber._grab_images()
+        return self._wrist_camera_subscriber.intrinsics_matrix() #also possible from rgb camera subscriber
+
     def get_observations(self):
 
         wrist_image = self._wrist_camera_subscriber.get_rgb_image_as_int()
@@ -154,7 +235,9 @@ class UR3eStation(BaseEnv):
         # TODO: resize images (but still include the original?)
 
         # resize wrist images to 224x224
-        wrist_image_resized = cv2.resize(wrist_image, (224, 224))
+        # print(wrist_image.shape)
+        # wrist_image_resized = cv2.resize(wrist_image, (224, 224))
+        wrist_image_resized = cv2.resize(wrist_image, (320, 240))
         # resize scene img, cut first 200 x pixels
         # scene_image_resized = scene_image.copy()
         # scene_image_resized = scene_image_resized[:, 200:]
@@ -183,9 +266,27 @@ class UR3eStation(BaseEnv):
             obs_dict["btn_state"] = button
             state = np.concatenate((state, button), axis=0)
 
+        if self.with_spectogram_model:
+            inputs = self.preprocess_spectrogram(spectogram_values[:,:,0])
+            with torch.no_grad():
+                # Pass input_values specifically (AST expects this argument name)
+                outputs = self.model(input_values=inputs)
+                
+                # Get Logits
+                logits = outputs.logits
+                
+                # Convert to Probabilities (Softmax)
+                probs = torch.nn.functional.softmax(logits, dim=-1)
+                
+                # Get Predicted Class
+                pred_idx = torch.argmax(probs, dim=-1).item()
+                obs_dict["pred_button_state"]=np.array([pred_idx],"float32")
+
         # obs_dict["state"] = state
 
         # print(f"the state type is {state.dtype}")
+        for k in obs_dict.keys():
+            obs_dict[k]=obs_dict[k].copy()
 
         return obs_dict
 
@@ -205,6 +306,13 @@ class UR3eStation(BaseEnv):
         self.robot.servo_to_tcp_pose(robot_pose_se3, duration)
         self.gripper._set_target_width(0)
         return
+
+    def act_tcp(self,new_pose,timestamp):
+        current_time = time.time()
+        duration = timestamp - current_time
+        self.robot.servo_to_tcp_pose(new_pose, duration)
+        return
+
 
     def act(self, robot_joints, gripper_pose, timestamp):
 
@@ -242,17 +350,22 @@ class UR3eStation(BaseEnv):
     def close(self):
         self._wrist_camera_publisher.stop()
         # self._scene_camera_publisher.stop()
-
+    def is_tcp_pose_reachable(self,new_pose):
+        return self.robot.is_tcp_pose_reachable(new_pose)
+    
     def move_robot_to_tcp_pose(self, pose):
         """move robot to a given SE3 tcp pose"""
-        self.robot.move_to_tcp_pose(pose)
+        self.robot.move_to_tcp_pose(pose).wait()
 
-    def move_robot_to_joint_config(self, robot_joints, gripper_width):
+    def move_robot_to_joint_config(self, robot_joints, gripper_width,wait=False):
         """move robot to a given joint configuration"""
         logger.debug(f"Moving robot to joint positions {robot_joints}")
 
         logger.debug(f"Moving gripper to {gripper_width}")
-        self.robot.move_to_joint_configuration(robot_joints)
+        if wait:
+            self.robot.move_to_joint_configuration(robot_joints).wait()
+        else:
+            self.robot.move_to_joint_configuration(robot_joints)
         self.gripper._set_target_width(gripper_width)
 
     def move_gripper(self, width):
