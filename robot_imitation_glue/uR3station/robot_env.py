@@ -133,11 +133,11 @@ class UR3eStation(BaseEnv):
         if self.with_spectogram_model:
             # Path to your saved model (usually the checkpoint folder with best metrics)
             # e.g., "./ast_delta_z/checkpoint-1900" or just "./ast_delta_z" if you saved the final model there
-            MODEL_PATH = "/home/rtalwar/robot-imitation-glue/ast_delta_z/checkpoint-340" 
+            MODEL_PATH = "/home/rtalwar/robot-imitation-glue/models/ast_delta_xyz_button_click_detector" 
 
             # MUST match the values printed during training
-            self.TRAIN_MEAN = 0.6198999470846517
-            self.TRAIN_STD  = 0.06112271215561439
+            self.TRAIN_MEAN = 0.632496669640229
+            self.TRAIN_STD  = 0.061697360397227355
 
             # Define labels (Update these to match your actual classes)
             ID2LABEL = {

@@ -1,6 +1,8 @@
 from pathlib import Path
 
-from lerobot.common.datasets.lerobot_dataset import LeRobotDataset
+# from lerobot.common.datasets.lerobot_dataset import LeRobotDataset
+from lerobot.datasets.lerobot_dataset import LeRobotDataset
+
 import numpy as np
 import torch
 
@@ -100,7 +102,7 @@ class LeRobotDatasetRecorder(BaseDatasetRecorder):
             print(f"Dataset {dataset_name} already exists. Loading it.")
             self.lerobot_dataset = LeRobotDataset(repo_id=dataset_name, root=self.root_dataset_dir)
             self.lerobot_dataset.start_image_writer(num_processes=0, num_threads=16)
-            self._n_recorded_episodes = len(self.lerobot_dataset.episode_data_index["from"])
+            self._n_recorded_episodes = self.lerobot_dataset.meta.total_episodes
             print(f"Loaded {self._n_recorded_episodes} episodes.")
         else:
             print(f"Dataset {dataset_name} does not exist. Creating it.")
@@ -142,7 +144,7 @@ class LeRobotDatasetRecorder(BaseDatasetRecorder):
         self._n_recorded_episodes += 1
 
     def finish_recording(self):
-        pass
+        self.lerobot_dataset.finalize()
 
     @property
     def n_recorded_episodes(self):

@@ -5,7 +5,8 @@ import loguru
 import numpy as np
 import rerun as rr
 
-from lerobot.common.datasets.lerobot_dataset import LeRobotDataset
+# from lerobot.common.datasets.lerobot_dataset import LeRobotDataset
+from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from robot_imitation_glue.base import BaseAgent, BaseDatasetRecorder, BaseEnv
 from robot_imitation_glue.collect_data_delta import action_to_tcp_pose
 from robot_imitation_glue.utils import precise_wait
@@ -460,130 +461,135 @@ def eval_xyz(  # noqa: C901
 
     # Define the center point for randomization
     pre_touching_pose = button_detector.get_pretouch_position(detected_3d_button_positions)
-
+    env.move_robot_to_tcp_pose(pre_touching_pose)
+    time.sleep(5)
     # --- 2. GENERATE DETERMINISTIC POSES ---
-    print("Generating 20 deterministic evaluation poses...")
-    eval_poses = generate_deterministic_poses(pre_touching_pose, env, count=20)
+    print("Generating 40 deterministic evaluation poses...")
+    eval_poses = generate_deterministic_poses(pre_touching_pose, env, count=40)
     print(f"Generated {len(eval_poses)} poses.")
+    try:
+        while not state.is_stopped:
 
-    while not state.is_stopped:
+            # Calculate which pose to use based on how many episodes we have recorded
+            # This cycles 0 to 19 repeatedly.
+            current_rollout_idx = recorder.n_recorded_episodes
+            pose_index = current_rollout_idx % len(eval_poses)
+            # pose_index = 36
+            new_pose = eval_poses[pose_index]
 
-        # Calculate which pose to use based on how many episodes we have recorded
-        # This cycles 0 to 19 repeatedly.
-        current_rollout_idx = recorder.n_recorded_episodes
-        pose_index = current_rollout_idx % len(eval_poses)
-        new_pose = eval_poses[pose_index]
-
-        logger.info(f"Moving to Eval Pose #{pose_index+1} / {len(eval_poses)}")
-        
-        # Move robot (no retry logic needed here, we checked reachability in the generator)
-        env.move_robot_to_tcp_pose(new_pose)
-
-        # --- Wait for user to start rollout ---
-        logger.info(f"Ready for Rollout {current_rollout_idx+1}. Press 'Start Rollout'.")
-        
-        while not state.rollout_active:
-            #this whileloop stays the same
-            cycle_end_time = time.time() + control_period
-
-            observations = env.get_observations()
-
-            vis_image = observations[env_observation_image_key].copy()
-            spectogram_image = observations[env_spectogram_key]
-            rr.log("scene", rr.Image(vis_image))
-            rr.log("spectogram", rr.Image(spectogram_image))
-
-            if cycle_end_time > time.time():
-                precise_wait(cycle_end_time)
-
-            if event.quit:
-                state.is_stopped = True
-                listener.stop()
-                recorder.finish_recording()
-                logger.info("Stop evaluation")
-                return
-
-            if event.start_rollout:
-                state.rollout_active = True
-            event.clear()
-
-        logger.info("Start rollout")
-        recorder.start_episode()
-
-        # reset to clear action buffers for chunking agents
-        policy_agent.reset()
-
-        while not state.is_stopped and state.rollout_active:
-            cycle_end_time = time.time() + control_period
-
-            observations = env.get_observations()
-
-            vis_image = observations[env_observation_image_key].copy()
-            spectogram_image = observations[env_spectogram_key]
-
-            ## print number of episodes to image
-            cv2.putText(
-                vis_image,
-                f"Episode: {recorder.n_recorded_episodes}",
-                (10, 30),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.5,
-                (255, 0, 0),
-                1,
-            )
+            logger.info(f"Moving to Eval Pose #{pose_index+1} / {len(eval_poses)}")
             
-            rr.log("scene", rr.Image(vis_image))
-            rr.log("spectogram", rr.Image(spectogram_image))
-            action, used_images,attn_maps = policy_agent.get_action(observations)
-            rr.log("button/btn_state", rr.Scalar(float(observations["btn_state"])))
-            rr.log("button/predicted_button_state", rr.Scalar(float(observations["pred_button_state"])))
-            rr.log(
-                "button/debug_text",
-                rr.TextDocument(f"""
-            # Button Debug Info
-            **Raw button state:** {observations['btn_state']}
-            **Predicted state:** {float(observations["pred_button_state"])}
-            """)
-            )
+            # Move robot (no retry logic needed here, we checked reachability in the generator)
+            env.move_robot_to_tcp_pose(new_pose)
 
-            # rr.log("action", rr.Scalar(float(action)))
+            # --- Wait for user to start rollout ---
+            logger.info(f"Ready for Rollout {current_rollout_idx+1}. Press 'Start Rollout'.")
+            
+            while not state.rollout_active:
+                #this whileloop stays the same
+                cycle_end_time = time.time() + control_period
 
-            if used_images is not None:
-                # used_images shape: [batch, n_obs_steps, C, H, W]
-                # assuming batch size 1:
-                obs_imgs = used_images[0]          # shape [2, C, H, W]
+                observations = env.get_observations()
 
-                for i, img in enumerate(obs_imgs):
-                    # convert tensor → numpy and reshape to HWC
-                    img = img.squeeze(0)  # remove batch dim -> [C, H, W]
+                vis_image = observations[env_observation_image_key].copy()
+                spectogram_image = observations[env_spectogram_key]
+                rr.log("scene", rr.Image(vis_image))
+                rr.log("spectogram", rr.Image(spectogram_image))
 
-                    img_np = img.cpu().numpy().transpose(1, 2, 0)
+                if cycle_end_time > time.time():
+                    precise_wait(cycle_end_time)
 
-                    rr.log(f"prediction_inputs/obs_{i}/raw", rr.Image(img_np))
-                    image, overlay, heat_gray, heat_color = overlay_all_keypoints(img_np, attn_maps[0][0][i],0.7)
-                    rr.log(f"prediction_inputs/obs_{i}/attention", rr.Image(overlay))
+                if event.quit:
+                    state.is_stopped = True
+                    listener.stop()
+                    recorder.finish_recording()
+                    logger.info("Stop evaluation")
+                    return
 
-
-            logger.debug(f"policy action: {action}")
-
-            recorder.record_step(observations, action.astype(np.float64))
-            next_pose = action_to_tcp_pose(env.get_robot_pose_se3(), action)
-            env.act_tcp(next_pose, time.time() + control_period)
-
-
-            if cycle_end_time > time.time():
-                precise_wait(cycle_end_time)
-
-            if event.stop_rollout:
-                state.rollout_active = False
-                num_rollouts += 1
-                logger.info(f"Stop rollout {num_rollouts}")
-                recorder.save_episode()
+                if event.start_rollout:
+                    state.rollout_active = True
                 event.clear()
-                logger.info(f"Saved episode {recorder.n_recorded_episodes}")
-                # --- SAFETY RETRACT ---
-                logger.info("Retracting...")
-                env.move_robot_to_tcp_pose(pre_touching_pose)
+
+            logger.info("Start rollout")
+            recorder.start_episode()
+
+            # reset to clear action buffers for chunking agents
+            policy_agent.reset()
+
+            while not state.is_stopped and state.rollout_active:
+                cycle_end_time = time.time() + control_period
+
+                observations = env.get_observations()
+
+                vis_image = observations[env_observation_image_key].copy()
+                spectogram_image = observations[env_spectogram_key]
+
+                ## print number of episodes to image
+                cv2.putText(
+                    vis_image,
+                    f"Episode: {recorder.n_recorded_episodes}",
+                    (10, 30),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.5,
+                    (255, 0, 0),
+                    1,
+                )
+                
+                rr.log("scene", rr.Image(vis_image))
+                rr.log("spectogram", rr.Image(spectogram_image))
+                action, used_images,attn_maps = policy_agent.get_action(observations)
+                rr.log("button/btn_state", rr.Scalar(float(observations["btn_state"])))
+                rr.log("button/predicted_button_state", rr.Scalar(float(observations["pred_button_state"])))
+                rr.log(
+                    "button/debug_text",
+                    rr.TextDocument(f"""
+                # Button Debug Info
+                **Raw button state:** {observations['btn_state']}
+                **Predicted state:** {float(observations["pred_button_state"])}
+                """)
+                )
+
+                # rr.log("action", rr.Scalar(float(action)))
+
+                if used_images is not None:
+                    # used_images shape: [batch, n_obs_steps, C, H, W]
+                    # assuming batch size 1:
+                    obs_imgs = used_images[0]          # shape [2, C, H, W]
+
+                    for i, img in enumerate(obs_imgs):
+                        # convert tensor → numpy and reshape to HWC
+                        img = img.squeeze(0)  # remove batch dim -> [C, H, W]
+
+                        img_np = img.cpu().numpy().transpose(1, 2, 0)
+
+                        rr.log(f"prediction_inputs/obs_{i}/raw", rr.Image(img_np))
+                        image, overlay, heat_gray, heat_color = overlay_all_keypoints(img_np, attn_maps[0][0][i],0.7)
+                        rr.log(f"prediction_inputs/obs_{i}/attention", rr.Image(overlay))
+
+
+                logger.debug(f"policy action: {action}")
+
+                recorder.record_step(observations, action.astype(np.float64))
+                next_pose = action_to_tcp_pose(env.get_robot_pose_se3(), action)
+                env.act_tcp(next_pose, time.time() + control_period)
+
+
+                if cycle_end_time > time.time():
+                    precise_wait(cycle_end_time)
+
+                if event.stop_rollout:
+                    state.rollout_active = False
+                    num_rollouts += 1
+                    logger.info(f"Stop rollout {num_rollouts}")
+                    recorder.save_episode()
+                    event.clear()
+                    logger.info(f"Saved episode {recorder.n_recorded_episodes}")
+                    # --- SAFETY RETRACT ---
+                    logger.info("Retracting...")
+                    env.move_robot_to_tcp_pose(pre_touching_pose)
+    finally:
+        recorder.finish_recording()
+
 if __name__ == "__main__":
     """example of how to use the eval function"""
     import os
