@@ -66,8 +66,8 @@ class ButtonDetector:
         return all_points_B
 
     def get_pretouch_position(self,detected_3d_button_positions):
-        p_B_TCP_touch = np.mean(np.vstack(detected_3d_button_positions), axis=0)   # the position where the TCP will touch your 3D point
-        # p_B_TCP_touch = detected_3d_button_positions   # the position where the TCP will touch your 3D point
+        # p_B_TCP_touch = np.mean(np.vstack(detected_3d_button_positions), axis=0)   # the position where the TCP will touch your 3D point
+        p_B_TCP_touch = detected_3d_button_positions   # the position where the TCP will touch your 3D point
         R_B_TCP_touch_X = np.array([1,0,0])  # rotation of TCP around X-axis  
         R_B_TCP_touch_Y = np.array([0,-1,0])  # rotation of TCP around Y-axis  
         R_B_TCP_touch_Z = np.array([0,0,-1])  # rotation of TCP around Z-axis  

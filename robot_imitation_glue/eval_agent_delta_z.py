@@ -421,8 +421,8 @@ def eval_xyz(  # noqa: C901
     event = Event()
     listener = init_keyboard_listener(event, state)
 
-    rr.init("robot_imitation_glue", spawn=True)
-
+    rr.init("robot_imitation_glue")
+    rr.spawn(memory_limit="5GB")
 
     control_period = 1 / fps
     num_rollouts = recorder.n_recorded_episodes
@@ -436,29 +436,39 @@ def eval_xyz(  # noqa: C901
 
     button_detector = ButtonDetector(env.get_camera_intrinsics(),camera_pose)
 
-    def collect_rgbd_and_tcp_pose(joints: JointConfigurationType
-    ) -> Tuple[NumpyIntImageType, NumpyDepthMapType, HomogeneousMatrixType]:
-        env.move_robot_to_joint_config(joints,0,wait=True)
-        observation = env.get_observations()
-        image = observation["wrist_image_original"]
-        depth_map = env.get_depth_map()
-        X_B_TCP = env.get_robot_pose_se3()
-        return image, depth_map, X_B_TCP
-    # collect images
-    image_depth_X_B_TCP = [collect_rgbd_and_tcp_pose(joints) for joints in button_detector.joint_positions] 
+    # def collect_rgbd_and_tcp_pose(joints: JointConfigurationType
+    # ) -> Tuple[NumpyIntImageType, NumpyDepthMapType, HomogeneousMatrixType]:
+    #     env.move_robot_to_joint_config(joints,0,wait=True)
+    #     observation = env.get_observations()
+    #     image = observation["wrist_image_original"]
+    #     depth_map = env.get_depth_map()
+    #     X_B_TCP = env.get_robot_pose_se3()
+    #     return image, depth_map, X_B_TCP
+    # # collect images
+    # image_depth_X_B_TCP = [collect_rgbd_and_tcp_pose(joints) for joints in button_detector.joint_positions] 
 
-    # detect button
-    image_and_detections=[]
-    for img,depth,X_B_TCP in image_depth_X_B_TCP:
-        results = button_detector.detect_button_ML(img,depth,X_B_TCP )
-        if results:
-            image_and_detections.append(results)
+    # # detect button
+    # image_and_detections=[]
+    # for img,depth,X_B_TCP in image_depth_X_B_TCP:
+    #     results = button_detector.detect_button_ML(img,depth,X_B_TCP )
+    #     if results:
+    #         image_and_detections.append(results)
 
-    # calculate button position in world frame
-    detected_3d_button_positions = button_detector.get_3d_coordinates_of_pixels_with_depth(image_and_detections)
+    # # calculate button position in world frame
+    # detected_3d_button_positions = button_detector.get_3d_coordinates_of_pixels_with_depth(image_and_detections)
+    # print(f"detected button position = {detected_3d_button_positions}")
+
+    env.robot.rtde_control.teachMode()
+    input("go above button position")
+    # detected_3d_button_positions = env.get_robot_pose_se3()[:3,3]
+    # detected_3d_button_positions = [-0.08719641 ,-0.37431874 , 0.039637  ]
+    detected_3d_button_positions = [-0.0769199 , -0.38387986  ,0.04016958]
+    #[-0.02903111 ,-0.40018098 , 0.03766195]
+    # detected_3d_button_positions =  [ 0.06598392 ,-0.35092692 , 0.03709084]
+    # #env.get_robot_pose_se3()[:3,3]
+    env.robot.rtde_control.endTeachMode()
     print(f"detected button position = {detected_3d_button_positions}")
-
-
+    # pre_touching_pose = button_detector.get_pretouch_position(detected_3d_button_positions)
     # Define the center point for randomization
     pre_touching_pose = button_detector.get_pretouch_position(detected_3d_button_positions)
     env.move_robot_to_tcp_pose(pre_touching_pose)
@@ -523,7 +533,18 @@ def eval_xyz(  # noqa: C901
 
                 vis_image = observations[env_observation_image_key].copy()
                 spectogram_image = observations[env_spectogram_key]
-
+                Fz=observations["ft"][2]
+                if Fz<=-40:
+                    print(f"stopped rollout because downward force was to big: fz = {Fz}")
+                    state.rollout_active = False
+                    num_rollouts += 1
+                    logger.info(f"Stop rollout {num_rollouts}")
+                    recorder.save_episode()
+                    event.clear()
+                    logger.info(f"Saved episode {recorder.n_recorded_episodes}")
+                    # --- SAFETY RETRACT ---
+                    logger.info("Retracting...")
+                    env.move_robot_to_tcp_pose(pre_touching_pose)
                 ## print number of episodes to image
                 cv2.putText(
                     vis_image,
@@ -538,8 +559,8 @@ def eval_xyz(  # noqa: C901
                 rr.log("scene", rr.Image(vis_image))
                 rr.log("spectogram", rr.Image(spectogram_image))
                 action, used_images,attn_maps = policy_agent.get_action(observations)
-                rr.log("button/btn_state", rr.Scalar(float(observations["btn_state"])))
-                rr.log("button/predicted_button_state", rr.Scalar(float(observations["pred_button_state"])))
+                rr.log("button/btn_state", rr.Scalars(float(observations["btn_state"])))
+                rr.log("button/predicted_button_state", rr.Scalars(float(observations["pred_button_state"])))
                 rr.log(
                     "button/debug_text",
                     rr.TextDocument(f"""
@@ -576,7 +597,6 @@ def eval_xyz(  # noqa: C901
 
                 if cycle_end_time > time.time():
                     precise_wait(cycle_end_time)
-
                 if event.stop_rollout:
                     state.rollout_active = False
                     num_rollouts += 1
