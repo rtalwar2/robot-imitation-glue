@@ -9,52 +9,52 @@ import time
 import numpy as np
 from cyclonedds.domain import DomainParticipant
 from sensor_comm_dds.communication.data_classes.sequence import Sequence
-from sensor_comm_dds.communication.readers.ft_reader import FTReaderConfig
+# from sensor_comm_dds.communication.readers.ft_reader2 import FTReaderConfig
 from cyclonedds.qos import Qos, Policy
 from cyclonedds.topic import Topic
 from cyclonedds.sub import DataReader
 from airo_ipc.framework.node import Node
 from airo_ipc.framework.framework import IpcKind
-from rtde_receive import RTDEReceiveInterface
+# from rtde_receive import RTDEReceiveInterface
 
 from loguru import logger
 
-class FTPublisher(Node):
-    """The publisher will read FT and publish in a loop"""
+# class FTPublisher(Node):
+#     """The publisher will read FT and publish in a loop"""
 
-    def __init__(self,config: FTReaderConfig, update_frequency=1, verbose=False):
-        self.config = config
-        self._ft_topic_name = "FT"
-        max_connection_attempts = 3
-        for connection_attempt in range(max_connection_attempts):
-            try:
-                self.rtde_receive = RTDEReceiveInterface(self.config.ROBOT_IP)
-                break
-            except RuntimeError as e:
-                logger.warning("Failed to connect to RTDE, retrying...")
-                if connection_attempt == max_connection_attempts:
-                    raise RuntimeError("Could not connect to RTDE. Is the robot in remote control? Is the IP correct? Is the network ok?")
-                else:
-                    time.sleep(1)
+#     def __init__(self,config: FTReaderConfig, update_frequency=1, verbose=False):
+#         self.config = config
+#         self._ft_topic_name = "FT"
+#         max_connection_attempts = 3
+#         for connection_attempt in range(max_connection_attempts):
+#             try:
+#                 self.rtde_receive = RTDEReceiveInterface(self.config.ROBOT_IP)
+#                 break
+#             except RuntimeError as e:
+#                 logger.warning("Failed to connect to RTDE, retrying...")
+#                 if connection_attempt == max_connection_attempts:
+#                     raise RuntimeError("Could not connect to RTDE. Is the robot in remote control? Is the IP correct? Is the network ok?")
+#                 else:
+#                     time.sleep(1)
                     
-        super().__init__(update_frequency, verbose)
+#         super().__init__(update_frequency, verbose)
 
-    def _setup(self):
+#     def _setup(self):
 
-        logger.info("Registering FT publishers.")
-        self._register_publisher(self._ft_topic_name, Sequence,IpcKind.DDS)
+#         logger.info("Registering FT publishers.")
+#         self._register_publisher(self._ft_topic_name, Sequence,IpcKind.DDS)
 
-    def _step(self):
-        """The _step method is called in a loop by the Node superclass."""
+#     def _step(self):
+#         """The _step method is called in a loop by the Node superclass."""
 
-        sample = Sequence([0 for _ in range(6)])
-        sample.values = self.rtde_receive.getActualTCPForce()
-        logger.debug(sample.values)
-        self._publish(
-            self._ft_topic_name,sample)
+#         sample = Sequence([0 for _ in range(6)])
+#         sample.values = self.rtde_receive.getActualTCPForce()
+#         logger.debug(sample.values)
+#         self._publish(
+#             self._ft_topic_name,sample)
         
-    def _teardown(self):
-        pass
+#     def _teardown(self):
+#         pass
 
 
 # class FTPublisher:

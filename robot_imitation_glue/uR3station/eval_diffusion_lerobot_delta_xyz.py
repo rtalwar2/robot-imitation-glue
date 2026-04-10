@@ -24,14 +24,14 @@ from transformers import ASTForAudioClassification, AutoConfig
 
 
 if __name__ == "__main__":
-    checkpoint_path = "/home/rtalwar/robot-imitation-glue/outputs/train/ramen-noodels/delta_xyz_final_rgb_audio_mit_frozen_intermediate"
+    checkpoint_path = "/home/rtalwar/robot-imitation-glue/outputs/train/ramen-noodels/delta_xyz_final_rgb_audio_BUTTON_frozen"
     # train_dataset_path = (
     #     "/home/rtalwar/robot-imitation-glue/datasets/delta_xyz_final_rgb"
     # )
     # eval_scenarios_dataset_path = train_dataset_path
 
     # eval_dataset_name = "eval_delta_xyz_final_rgb_audio_mit_frozen_intermediate_fixed_button"
-    eval_dataset_name = "delme"
+    eval_dataset_name = "opendeurdag"
 
     def preprocessor(obs_dict):
         spectogram_values_image = obs_dict["spectogram_values"]

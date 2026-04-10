@@ -1,0 +1,396 @@
+\documentclass[conference]{IEEEtran}
+\IEEEoverridecommandlockouts
+\usepackage{cite}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{algorithmic}
+\usepackage{graphicx}
+\usepackage{textcomp}
+\usepackage{xcolor}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{hyperref}
+\def\BibTeX{{\rm B\kern-.05em{\sc i\kern-.025em b}\kern-.08em
+    T\kern-.1667em\lower.7ex\hbox{E}\kern-.125emX}}
+\begin{document}
+
+\title{Audio-Augmented Diffusion Policy: Sound as Pseudo-Instrumentation for Contact-Rich Robot Manipulation}
+
+\author{\IEEEauthorblockN{1\textsuperscript{st} Given Name Surname}
+\IEEEauthorblockA{\textit{dept. name of organization (of Aff.)} \\
+\textit{name of organization (of Aff.)}\\
+City, Country \\
+email address or ORCID}
+\and
+\IEEEauthorblockN{2\textsuperscript{nd} Given Name Surname}
+\IEEEauthorblockA{\textit{dept. name of organization (of Aff.)} \\
+\textit{name of organization (of Aff.)}\\
+City, Country \\
+email address or ORCID}
+}
+
+\maketitle
+
+\begin{abstract}
+Contact-rich manipulation benefits from object-mounted instrumentation: a contact switch on a button, for example, enables automated expert data collection via a scripted proportional controller and provides a direct task-progress signal during policy execution.
+But instrumenting every object is impractical outside the lab.
+We investigate whether audio can partially substitute for instrumentation at test time while retaining its data-collection advantages.
+We integrate an Audio Spectrogram Transformer (AST) into the conditioning pathway of a diffusion policy and compare frozen versus finetuned backbones, embedding versus classifier outputs, on a real UR3e button-press-and-retract task with 40 automatically collected demonstrations.
+Our best audio-augmented model achieves 57.5\% success, compared to 55.0\% for a vision-only baseline and 62.5\% for an oracle with direct button-state access.
+Task-specific AST finetuning is critical: generic AudioSet features degrade performance below the vision-only baseline, while a button-click-finetuned AST recovers part of the gap to the oracle.
+\end{abstract}
+
+\begin{IEEEkeywords}
+imitation learning, diffusion policy, audio, multimodal, contact-rich manipulation
+\end{IEEEkeywords}
+
+%=============================================================================
+\section{Introduction}
+%=============================================================================
+
+Learning manipulation policies from demonstrations has seen rapid progress with diffusion-based approaches~\cite{chi2023diffusion}.
+Contact-rich tasks, however, remain difficult for vision-only systems.
+In a button-pressing task, the robot must detect the moment of successful contact to stop pressing and retract.
+This event is often visually ambiguous: the end-effector occludes the contact point, and the physical deflection is sub-millimeter.
+
+Object-mounted instrumentation, such as a binary contact switch, solves this directly.
+In our setting, a contact switch on the button provides three distinct advantages:
+\begin{enumerate}
+    \item \emph{Automated data collection.}
+    The contact signal enables a scripted proportional controller that collects demonstrations without human teleoperation.
+    The controller uses the button signal to detect successful presses and trigger retraction automatically.
+    \item \emph{Demonstration quality.}
+    The scripted controller produces consistent, minimal-force demonstrations.
+    It approaches with proportional speed control and stops immediately upon contact, avoiding the excess force and timing variability typical of human teleoperation.
+    \item \emph{Privileged task-progress signal.}
+    Conditioning a learned policy on the button state during execution improves performance by providing direct knowledge of whether contact has occurred.
+\end{enumerate}
+
+The first two advantages apply only during data collection and are preserved regardless of what the policy observes at deployment.
+The third requires the instrument at test time.
+Our question is whether this privileged signal can be replaced by a cheaper modality: the sound of a button click, captured by an ambient microphone, requires no modification to the object or environment.
+
+We investigate this by integrating a pretrained Audio Spectrogram Transformer (AST)~\cite{gong2021ast} into the global conditioning pathway of a diffusion policy~\cite{chi2023diffusion}.
+The AST processes a mel-spectrogram from the last 3~seconds of ambient audio, and its features are concatenated with visual features from a ResNet-18 encoder before conditioning the denoising U-Net.
+We compare:
+\begin{itemize}
+    \item Vision only: RGB wrist camera + proprioceptive state.
+    \item Oracle: vision + ground-truth binary button signal.
+    \item Audio embeddings: vision + frozen or finetuned AST pooler output.
+    \item Audio classifier (pseudo-instrumentation): vision + AST logits from a button-click classifier, replacing the ground-truth button signal.
+\end{itemize}
+
+On a real UR3e robot, the best audio-only model reaches 57.5\% success compared to 55.0\% for vision only and 62.5\% for the oracle.
+Generic AudioSet features consistently hurt performance; task-specific finetuning is required for audio to help.
+
+%=============================================================================
+\section{Related Work}
+%=============================================================================
+
+\textbf{Diffusion policies for manipulation.}
+Chi et al.~\cite{chi2023diffusion} introduced Diffusion Policy, framing visuomotor policy learning as conditional denoising diffusion over action trajectories.
+A 1D U-Net conditioned on visual features (ResNet with spatial softmax) and proprioceptive state uses DDPM~\cite{ho2020ddpm} to generate multi-step action chunks.
+Follow-up work has extended diffusion policies to 3D representations~\cite{ze20243ddp}, language conditioning~\cite{ha2023scaling}, and dexterous manipulation~\cite{chi2024universal}.
+We extend the conditioning pathway to include audio features.
+
+\textbf{Audio in robotics.}
+Audio has been used for object recognition~\cite{gandhi2020swoosh}, material classification~\cite{clarke2018learning}, and grasp stability estimation~\cite{huang2024audiograsp}.
+Li et al.~\cite{li2022seehearfeel} showed that audio and tactile signals improve policy performance on contact-rich tasks through a self-supervised multimodal encoder.
+Liu et al.~\cite{liu2024maniwav} integrate audio into diffusion policies using a contrastive audio-visual representation.
+Our approach differs in directly conditioning the diffusion policy on a pretrained AST, comparing both generic embeddings and task-specific classifier outputs.
+
+\textbf{Audio Spectrogram Transformer.}
+Gong et al.~\cite{gong2021ast} proposed the AST, a pure-attention model that treats audio spectrograms as image-like inputs to a Vision Transformer.
+Pretrained on AudioSet~\cite{gemmeke2017audioset}, the AST achieves strong transfer performance on downstream audio tasks.
+We use this pretrained representation and investigate whether AudioSet features transfer to robotic contact detection.
+
+%=============================================================================
+\section{Method}
+%=============================================================================
+
+\subsection{Task and Hardware}
+
+The task is \emph{button press and retract}: the robot lowers its end-effector onto a push-button until the button clicks, then retracts upward.
+Success requires reaching the button, pressing with sufficient but not excessive force, and detecting the click to initiate retraction.
+
+We use a UR3e robot arm with a Robotiq 2F-85 gripper, a wrist-mounted Intel RealSense D435 RGB camera ($320{\times}240$ at 30~Hz), a Bota Systems force-torque sensor, and an ambient microphone.
+The button is instrumented with a binary contact switch used for ground-truth labeling during data collection and as oracle input during policy evaluation.
+Control runs at 10~Hz.
+
+\subsection{Automated Data Collection}
+\label{sec:data_collection}
+
+The contact switch enables fully automated demonstration collection through a three-phase proportional controller, eliminating the need for human teleoperation.
+
+\textbf{Phase~1 (lateral alignment).}
+The controller computes the 3D vector from end-effector to button in the tool frame and applies proportional lateral corrections with gain $k_{xy}$.
+This phase terminates when lateral error drops below 2~mm.
+
+\textbf{Phase~2 (descent).}
+The controller descends toward the button with proportional vertical gain $k_z$.
+Below a pre-contact height, descent slows to a constant 1~mm/step.
+This phase terminates when the contact switch detects a button press.
+
+\textbf{Phase~3 (retraction).}
+The controller moves upward at a fixed 2~cm/step until reaching 10~cm above the button.
+
+To produce diverse demonstrations, we randomize both the initial pose ($\pm$5~cm in XY, 0--5~cm in Z, $\pm$90$^\circ$ rotation around Z) and the approach style.
+An approach-style parameter $\alpha$ is sampled log-uniformly from $[0.1, 10]$ and modulates the gain ratio: $k_{xy} = k_0\sqrt{\alpha}$, $k_z = k_0/\sqrt{\alpha}$.
+Low $\alpha$ produces aggressive vertical approaches; high $\alpha$ produces careful lateral alignment before descent.
+Step sizes are clipped to $[2\text{~mm}, 3\text{~cm}]$ for safety.
+Controller hyperparameters were tuned in a 2D simulation prior to deployment.
+We collected 40 demonstrations with this system.
+
+\subsection{Observation and Action Spaces}
+
+\textbf{Observations.}
+Each observation at time $t$ consists of:
+\begin{itemize}
+    \item Wrist RGB image $\mathbf{I}_t \in \mathbb{R}^{3 \times 224 \times 224}$, resized from the raw camera feed.
+    \item Robot state $\mathbf{s}_t$: a scalar button signal (in oracle and combined models) or empty (in vision-only and audio-only variants).
+    \item Audio spectrogram $\mathbf{A}_t \in \mathbb{R}^{298 \times 128}$: a mel-spectrogram computed over the most recent 3~seconds of audio via Kaldi, yielding 298 time frames $\times$ 128 frequency bins.
+\end{itemize}
+
+\textbf{Actions.}
+Actions are 3D Cartesian position deltas $\mathbf{a}_t = [\Delta x, \Delta y, \Delta z]$ expressed in the tool frame: $\mathbf{a}_t = \mathbf{R}_t^{-1}(\mathbf{p}_{\text{target}} - \mathbf{p}_t)$, where $\mathbf{R}_t$ and $\mathbf{p}_t$ are the end-effector orientation and position.
+This frame choice makes actions invariant to the robot's base-frame orientation.
+
+\subsection{Diffusion Policy Architecture}
+
+We build on Diffusion Policy~\cite{chi2023diffusion}, which models the action distribution as a denoising diffusion process.
+A 1D convolutional U-Net with FiLM conditioning~\cite{perez2018film} generates a horizon of $H{=}16$ future actions, of which 8 are executed before re-planning.
+The U-Net is conditioned on a global feature vector assembled from the $n{=}2$ most recent observations:
+
+\begin{equation}
+    \mathbf{g} = \text{concat}\!\left[\,\mathbf{s}_{t-1:t},\; \mathbf{f}^{\text{rgb}}_{t-1:t},\; \mathbf{f}^{\text{audio}}_{t-1:t}\,\right]
+    \label{eq:global_cond}
+\end{equation}
+
+\noindent where $\mathbf{s}$ is the robot state, $\mathbf{f}^{\text{rgb}}$ are visual features, and $\mathbf{f}^{\text{audio}}$ are audio features (omitted in the vision-only baseline).
+
+\subsubsection{Vision Encoder}
+A ResNet-18 backbone with group normalization extracts convolutional feature maps from each wrist image.
+A spatial softmax layer~\cite{finn2016spatial} computes 32 expected keypoint positions, yielding a 64-dimensional vector per image projected to 32 dimensions.
+Random crops ($84{\times}84$) are applied during training; center crops during evaluation.
+
+\subsubsection{Audio Encoder}
+\label{sec:audio_encoder}
+We use an AST~\cite{gong2021ast} pretrained on AudioSet~\cite{gemmeke2017audioset}.
+The model treats the $298 \times 128$ mel-spectrogram as a sequence of patches and produces a 768-dimensional CLS token embedding.
+Spectrograms are normalized using training-set statistics: $\hat{\mathbf{A}} = (\mathbf{A} - \mu) / (2\sigma)$.
+
+We explore several integration strategies:
+\begin{itemize}
+    \item Frozen embedding: the AST backbone is frozen; the 768-dim pooler output is concatenated into the global conditioning vector.
+    \item Unfrozen embedding: the full AST is finetuned end-to-end with the policy.
+    \item Frozen/unfrozen classifier: the AST is first finetuned as a binary button-click detector (2-class classification, lr $10^{-5}$, 10 epochs). Its 2-dimensional logits then replace the ground-truth button signal in the policy's state input. This is our \emph{pseudo-instrumentation} approach.
+\end{itemize}
+
+\subsubsection{Denoising U-Net}
+The global conditioning vector is injected into each residual block of a 1D convolutional U-Net via FiLM layers.
+The U-Net has channel dimensions (512, 1024, 2048), kernel size~5, and group normalization with 8 groups.
+The diffusion process uses DDPM with 100 forward steps, a squared-cosine beta schedule, and epsilon prediction.
+
+\subsection{Training}
+
+All models are trained with Adam (lr $10^{-4}$, weight decay $10^{-6}$), a cosine schedule with 500 warmup steps.
+Image augmentations (brightness, contrast, saturation, hue, sharpness jitter) are applied.
+Actions and states are normalized to $[-1, 1]$ via min-max scaling; spectrograms use AST-specific normalization (Section~\ref{sec:audio_encoder}).
+
+%=============================================================================
+\section{Experiments}
+%=============================================================================
+
+\subsection{Evaluation Protocol}
+
+Each model is evaluated over $N{=}40$ real-robot episodes.
+We classify each episode into one of five outcome categories:
+\begin{itemize}
+    \item \textbf{Success}: the button is pressed and the robot retracts.
+    \item \textbf{Hover}: the robot positions above the button but fails to make sufficient contact.
+    \item \textbf{Too hard}: the robot presses with excessive force, triggering safety limits.
+    \item \textbf{Sideways}: the gripper approaches from an incorrect angle.
+    \item \textbf{Fake}: the policy retracts before the button is actually pressed (audio false positive).
+\end{itemize}
+
+Force-torque data from the wrist sensor is recorded for post-hoc contact analysis.
+
+\subsection{Results}
+
+Table~\ref{tab:main_results} presents results for all 12 model variants.
+
+\begin{table}[t]
+\caption{Results on button-press-and-retract ($N{=}40$ per model). Succ = successes, Hov = hover failures, TH = too hard, SW = sideways, FK = fake retraction.}
+\label{tab:main_results}
+\begin{center}
+\setlength{\tabcolsep}{3pt}
+\begin{tabular}{lcccccc}
+\toprule
+\textbf{Model} & \textbf{Rate} & \textbf{Succ} & \textbf{Hov} & \textbf{TH} & \textbf{SW} & \textbf{FK} \\
+\midrule
+Expert (scripted) & 100\% & 40 & 0 & 0 & 0 & 0 \\
+\midrule
+Vision only & 55.0\% & 22 & 16 & 0 & 2 & 0 \\
+Oracle (V + button) & 62.5\% & 25 & 15 & 0 & 0 & 0 \\
+\midrule
+\multicolumn{7}{l}{\textit{Audio + button signal}} \\
+\quad + GenAST frozen & 45.0\% & 18 & 21 & 0 & 1 & 0 \\
+\quad + GenAST unfrozen & 62.5\% & 25 & 15 & 0 & 0 & 0 \\
+\midrule
+\multicolumn{7}{l}{\textit{Generic AST (no button finetuning)}} \\
+\quad Frozen embed & 47.5\% & 19 & 21 & 0 & 0 & 0 \\
+\quad Unfrozen embed & 40.0\% & 16 & 24 & 0 & 0 & 0 \\
+\midrule
+\multicolumn{7}{l}{\textit{Button-finetuned AST}} \\
+\quad Pseudo-instr (swap) & 55.0\% & 22 & 17 & 0 & 0 & 1 \\
+\quad Frozen classif & \textbf{57.5\%} & 23 & 17 & 0 & 0 & 0 \\
+\quad Unfrozen classif & 42.5\% & 17 & 23 & 0 & 0 & 0 \\
+\quad Frozen embed & 45.0\% & 18 & 14 & 3 & 1 & 4 \\
+\quad Unfrozen embed & \textbf{57.5\%} & 23 & 17 & 0 & 0 & 0 \\
+\bottomrule
+\end{tabular}
+\end{center}
+\end{table}
+
+\subsubsection{Baselines}
+
+The vision-only model achieves 55.0\% success.
+Its failures are predominantly hovering (16/40): the robot positions itself above the button but does not descend far enough to make contact.
+Two episodes fail due to approaching from the side.
+No episodes involve excessive force.
+
+The oracle, which receives the ground-truth button signal, reaches 62.5\%.
+All 15 failures are hovers.
+The button signal helps the robot know when to retract but does not help it reach the button in the first place.
+
+\subsubsection{Audio-only models}
+The best audio-only configurations are the button-finetuned AST models.
+The frozen classifier achieves 57.5\%, as does the unfrozen embedding, gaining 2.5 percentage points over the vision-only baseline and closing about a third of the 7.5-point gap to the oracle.
+The pseudo-instrumentation variant (AST logits replacing the button signal) matches the vision-only baseline at 55.0\%.
+
+Generic AST features, without button-click finetuning, hurt performance.
+The frozen generic model reaches only 47.5\%, and the unfrozen model drops to 40.0\% with 24/40 hover failures.
+AudioSet features, trained on 527 general sound categories, do not transfer to this contact-detection task without additional finetuning.
+
+\subsubsection{Combined audio and button}
+Adding an unfrozen generic AST to the oracle model matches the oracle at 62.5\%.
+The frozen variant drops to 45.0\%, suggesting that untuned audio features can interfere with the button signal.
+
+\subsubsection{Failure modes}
+Hovering dominates across all models (14--24 of 40 episodes in every variant except the expert), indicating that the primary bottleneck is spatial: reaching the button from a randomized initial pose.
+Neither audio nor the button signal reduces hovering, because both provide information about contact that only becomes relevant once the robot is near the button.
+
+The ``fake'' failure mode occurs when the AST signals a button press that has not happened, causing premature retraction.
+This affects the frozen embedding model most (4/40) and appears once in the pseudo-instrumentation model.
+It is absent from all non-audio models.
+
+The ``too hard'' mode appears only in the button-finetuned frozen embedding model (3/40), which also has the most fake retractions.
+This model's diverse failure profile suggests unstable conditioning, possibly because the 768-dimensional frozen embedding introduces too much noise relative to its signal.
+
+\subsubsection{Intermediate projection layer}
+
+Table~\ref{tab:intermediate} tests whether a 64-dimensional bottleneck between the AST and the conditioning vector helps by filtering noise from the high-dimensional embedding.
+
+\begin{table}[t]
+\caption{Effect of a 64-dim intermediate projection on generic AST models ($N{=}40$).}
+\label{tab:intermediate}
+\begin{center}
+\begin{tabular}{lccc}
+\toprule
+\textbf{Model} & \textbf{Rate} & \textbf{Hov} & \textbf{SW} \\
+\midrule
+Vision only & 55.0\% & 16 & 2 \\
+\midrule
+GenAST frozen & 47.5\% & 21 & 0 \\
+GenAST frozen + 64-dim & 42.5\% & 22 & 1 \\
+GenAST unfrozen & 40.0\% & 24 & 0 \\
+GenAST unfrozen + 64-dim & 40.0\% & 24 & 0 \\
+\bottomrule
+\end{tabular}
+\end{center}
+\end{table}
+
+It does not.
+For the frozen model, adding the projection slightly hurts performance (47.5\% to 42.5\%); for the unfrozen models, results are unchanged.
+When the underlying features are not task-relevant, compressing them through a bottleneck does not help.
+
+\subsubsection{Force analysis}
+
+We analyze peak vertical force ($F_z$) during contact episodes, excluding ``too hard'' and ``sideways'' episodes to focus on successful and hovering contact profiles.
+We apply Mann-Whitney U pairwise tests with Bonferroni correction ($p > 0.0008$ threshold for 78 comparisons) and report compact letter display (CLD) groupings.
+
+The scripted expert produces the lightest contact forces (CLD group~\textsf{a}).
+The oracle falls in group~\textsf{ab}, pressing more gently than the vision-only baseline (group~\textsf{c}).
+Several button-finetuned AST models fall in group~\textsf{bc}, intermediate between oracle and vision-only.
+Models without contact feedback (vision-only, generic AST, pseudo-instrumentation) cluster in group~\textsf{c}, pressing harder on average.
+This pattern is consistent with the role of contact detection: models that can identify the moment of button press exert less force because they initiate retraction sooner.
+
+\subsubsection{Statistical analysis}
+
+With $N{=}40$ episodes per model, the 2.5 percentage point improvement of the best audio models over the vision-only baseline is modest.
+Bayesian 95\% credible intervals (Beta$(k{+}1, n{-}k{+}1)$ posterior with uniform prior) overlap between most model variants.
+The vision-only baseline's interval spans roughly 40--70\%, and the best audio models' intervals are similarly wide.
+The difference between vision-only and oracle (7.5 percentage points) shows clearer separation but still overlaps.
+Larger sample sizes would be needed to establish statistical significance for the observed differences.
+
+%=============================================================================
+\section{Discussion}
+%=============================================================================
+
+\textbf{Instrumentation as a data-collection tool.}
+The contact switch's most unambiguous benefit in our pipeline is enabling automated demonstration collection.
+The scripted proportional controller avoids the variability and excess force of human teleoperation, producing demonstrations where the expert achieves 100\% success with the lightest contact forces of any model.
+These data-collection advantages persist at deployment regardless of whether the policy observes the button signal.
+
+\textbf{Audio provides a small contact signal.}
+The best audio-only models (button-finetuned AST, frozen classifier and unfrozen embedding) reach 57.5\%, a 2.5 percentage point gain over vision alone.
+This improvement is consistent with audio providing some contact feedback, but the effect is modest relative to the 7.5-point gap between vision-only and oracle.
+The force analysis corroborates this: button-finetuned AST models press with intermediate force, falling between the oracle (which presses lightly) and the vision-only baseline (which presses harder on average).
+
+\textbf{Task-specific finetuning is essential.}
+Generic AudioSet features do not transfer to robotic contact detection.
+Both frozen (47.5\%) and unfrozen (40.0\%) generic AST models perform worse than the vision-only baseline (55.0\%).
+Finetuning the AST on button-click spectrograms (a binary classification task requiring only labeled audio segments) is necessary for audio features to help.
+
+\textbf{Hovering is the bottleneck.}
+The dominant failure across all models is hovering: the robot stops above the button without making contact.
+This is a spatial reaching problem, not a contact-detection problem, and neither audio nor the button signal addresses it.
+Improving reaching accuracy through better visual representations, depth sensing, or policy architecture changes would likely yield larger gains than further audio integration.
+
+\textbf{Limitations.}
+This study covers a single task with a distinctive acoustic signature.
+Button clicks are loud and brief; generalization to quieter or more ambiguous contact sounds (e.g., soft insertion) is unknown.
+The 40-episode evaluation, while standard for real-robot experiments, limits statistical power.
+The ambient microphone also captures robot motor noise, which may confound results in noisier settings.
+
+%=============================================================================
+\section{Conclusion}
+%=============================================================================
+
+We integrated an Audio Spectrogram Transformer into a diffusion policy for a real-robot button-press task, testing whether audio can substitute for object-mounted instrumentation at deployment.
+Instrumentation proved most valuable for automating data collection: a scripted proportional controller produced 40 expert demonstrations without human teleoperation.
+At test time, button-finetuned AST features provided a modest improvement over vision alone (57.5\% vs.\ 55.0\%), closing about a third of the gap to an oracle with direct button-state access (62.5\%).
+Generic AudioSet features consistently degraded performance, confirming that task-specific finetuning is necessary.
+The primary failure mode across all models was hovering rather than contact detection, suggesting that spatial reaching accuracy is the more pressing bottleneck for this task.
+
+\section*{Acknowledgment}
+
+% TODO: Add acknowledgments.
+
+\begin{thebibliography}{00}
+\bibitem{chi2023diffusion} C. Chi, S. Feng, Y. Du, Z. Xu, E. Cousineau, B. Burchfiel, and S. Song, ``Diffusion policy: Visuomotor policy learning via action diffusion,'' in \textit{Proc. Robotics: Science and Systems (RSS)}, 2023.
+\bibitem{ho2020ddpm} J. Ho, A. Jain, and P. Abbeel, ``Denoising diffusion probabilistic models,'' in \textit{Advances in Neural Information Processing Systems (NeurIPS)}, 2020.
+\bibitem{gong2021ast} Y. Gong, Y.-A. Chung, and J. Glass, ``AST: Audio Spectrogram Transformer,'' in \textit{Proc. Interspeech}, 2021.
+\bibitem{gemmeke2017audioset} J. F. Gemmeke, D. P. W. Ellis, D. Freedman, A. Jansen, W. Lawrence, R. C. Moore, M. Plakal, and M. Ritter, ``Audio Set: An ontology and human-labeled dataset for audio events,'' in \textit{Proc. IEEE ICASSP}, 2017.
+\bibitem{perez2018film} E. Perez, F. Strub, H. de Vries, V. Dumoulin, and A. Courville, ``FiLM: Visual reasoning with a general conditioning layer,'' in \textit{Proc. AAAI}, 2018.
+\bibitem{finn2016spatial} C. Finn, X. Y. Tan, Y. Duan, T. Darrell, S. Levine, and P. Abbeel, ``Deep spatial autoencoders for visuomotor learning,'' in \textit{Proc. IEEE ICRA}, 2016.
+\bibitem{ze20243ddp} Y. Ze, G. Zhang, K. Zhang, C. Hu, M. Wang, and H. Xu, ``3D diffusion policy: Generalizable visuomotor policy learning via simple 3D representations,'' in \textit{Proc. RSS}, 2024.
+\bibitem{ha2023scaling} H. Ha, P. Florence, and S. Song, ``Scaling up and distilling down: Language-guided robot skill acquisition,'' in \textit{Proc. CoRL}, 2023.
+\bibitem{chi2024universal} C. Chi, Z. Xu, C. Pan, E. Cousineau, B. Burchfiel, S. Feng, R. Tedrake, and S. Song, ``Universal manipulation interface: In-the-wild robot teaching without in-the-wild robots,'' in \textit{Proc. RSS}, 2024.
+\bibitem{gandhi2020swoosh} D. Gandhi, A. Gupta, and L. Pinto, ``Swoosh! Rattle! Thump! Actions that sound,'' in \textit{Proc. RSS}, 2020.
+\bibitem{clarke2018learning} S. Clarke, T. Rhodes, C. G. Atkeson, and O. Kroemer, ``Learning audio feedback for estimating amount and flow of granular material,'' in \textit{Proc. CoRL}, 2018.
+\bibitem{huang2024audiograsp} T. Huang, I. Guzey, and S. Chintala, ``Hearing touch: Audio-visual pretraining for contact-rich manipulation,'' in \textit{Proc. ICRA}, 2024.
+\bibitem{li2022seehearfeel} J. Li, Y. Dong, R. Calandra, and P. Abbeel, ``See, hear, and feel: Smart sensory fusion for robotic manipulation,'' in \textit{Proc. CoRL}, 2022.
+\bibitem{liu2024maniwav} Z. Liu, C. Chi, E. Cousineau, N. Kuppuswamy, B. Burchfiel, and S. Song, ``ManiWAV: Learning robot manipulation from in-the-wild audio-visual data,'' in \textit{Proc. CoRL}, 2024.
+\end{thebibliography}
+
+\end{document}

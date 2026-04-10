@@ -428,13 +428,13 @@ def eval_xyz(  # noqa: C901
     num_rollouts = recorder.n_recorded_episodes
 
     # --- 1. Load Camera & Detect Button Center (Run once) ---
-    from airo_dataset_tools.data_parsers.pose import Pose
-    camera_pose_path = "camera_pose_Daniilidis.json"
+    # from airo_dataset_tools.data_parsers.pose import Pose
+    # camera_pose_path = "camera_pose_Daniilidis.json"
 
-    with open(camera_pose_path, "r") as f:
-        camera_pose = Pose.model_validate_json(f.read()).as_homogeneous_matrix()
+    # with open(camera_pose_path, "r") as f:
+    #     camera_pose = Pose.model_validate_json(f.read()).as_homogeneous_matrix()
 
-    button_detector = ButtonDetector(env.get_camera_intrinsics(),camera_pose)
+    button_detector = ButtonDetector(env.get_camera_intrinsics(),X_TCP_C=None)
 
     # def collect_rgbd_and_tcp_pose(joints: JointConfigurationType
     # ) -> Tuple[NumpyIntImageType, NumpyDepthMapType, HomogeneousMatrixType]:
@@ -592,7 +592,10 @@ def eval_xyz(  # noqa: C901
 
                 recorder.record_step(observations, action.astype(np.float64))
                 next_pose = action_to_tcp_pose(env.get_robot_pose_se3(), action)
-                env.act_tcp(next_pose, time.time() + control_period)
+                if env.is_tcp_pose_reachable(next_pose):
+                    env.act_tcp(next_pose, time.time() + control_period)
+                else:
+                    print("TCP POSE NOT REACHABLE")
 
 
                 if cycle_end_time > time.time():

@@ -77,7 +77,7 @@ class ButtonDetector:
         )
         X_B_TCP_touch = X_B_TCP_touch_se3.homogeneous_matrix
 
-        X_B_TCP_touch[:3, 3] = X_B_TCP_touch[:3, 3] + np.array([0.0, 0.0, 0.1]) # add 2 cm to the z-axis to avoid colliding
+        X_B_TCP_touch[:3, 3] = X_B_TCP_touch[:3, 3] + np.array([0.0, 0.0, 0.1]) # add 10 cm to the z-axis to avoid colliding
         return X_B_TCP_touch
 
 

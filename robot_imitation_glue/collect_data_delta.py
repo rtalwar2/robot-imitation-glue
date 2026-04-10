@@ -301,7 +301,7 @@ def randomize_initial_pose(X_B_TCP_touch,
 def create_action(tcp_pose,button_position):
     actions = button_position - tcp_pose[:3,3]
     actions_in_toolspace = np.linalg.inv(tcp_pose[:3,:3])@actions # action is now in tool space
-    return actions_in_toolspace#fix offset error in tool_space
+    return actions_in_toolspace
 
 def action_to_tcp_pose(tcp_pose,action):
     final_pose = tcp_pose.copy()
@@ -596,7 +596,6 @@ def teleoperate(  # noqa: C901
     teleop_agent: BaseAgent
 ):
     assert env.ACTION_SPEC == teleop_agent.ACTION_SPEC
-
 
     while True:
         frequency=10

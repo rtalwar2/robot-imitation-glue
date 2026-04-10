@@ -217,10 +217,27 @@ def teleoperate(  # noqa: C901
 ):
     assert env.ACTION_SPEC == teleop_agent.ACTION_SPEC
 
+    frequency = 10
+    control_period = 1 / frequency
+
+    first_control_period = 5.0
+    first_cycle_end_time = time.time() + first_control_period
+    first_action = teleop_agent.get_action({})
+    logger.info(f"First action (slow): {first_action}")
+    first_gripper_target = (1 - first_action[-1]) * 0.085
+    env.act(
+        robot_joints=first_action[0:6],
+        gripper_pose=first_gripper_target,
+        timestamp=time.time() + first_control_period,
+    )
+
+    if first_cycle_end_time > time.time():
+        precise_wait(first_cycle_end_time)
+    else:
+        print("first cycle time exceeded control period")
+
 
     while True:
-        frequency=10
-        control_period = 1/frequency
         cycle_end_time = time.time() + control_period
 
         # print("observation time: ", observation_time)
