@@ -4,7 +4,7 @@ from typing import Callable, Dict, Optional
 
 import tqdm
 
-from lerobot.common.datasets.lerobot_dataset import LeRobotDataset
+from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
 
 def transform_dataset(  # noqa: C901
@@ -73,9 +73,9 @@ def transform_dataset(  # noqa: C901
 
     dataset = LeRobotDataset(repo_id=repo_id, root=root_dir)
     if episodes_to_drop:
-        n_episodes = len(dataset.episode_data_index["from"])
+        n_episodes = dataset.meta.total_episodes
         episodes_to_include = [i for i in range(n_episodes)]
-        episodes_to_include = set(episodes_to_include).difference(set(episodes_to_drop))
+        episodes_to_include = sorted(set(episodes_to_include).difference(set(episodes_to_drop)))
         print(f"dropping specified episodes, episodes to include = {episodes_to_include}")
         dataset = LeRobotDataset(repo_id=repo_id, root=root_dir, episodes=episodes_to_include)
 
@@ -108,14 +108,35 @@ def transform_dataset(  # noqa: C901
     )
 
     # Process each episode in the old dataset
-    episode_indices = dataset.episode_data_index
-    if verbose:
-        print(f"Processing {len(episode_indices['from'])} episodes")
+    selected_episodes = dataset.episodes
+    if selected_episodes is None:
+        selected_episodes = list(range(dataset.meta.total_episodes))
+    elif not isinstance(selected_episodes, list):
+        selected_episodes = sorted(selected_episodes)
 
-    for ep_idx in tqdm.tqdm(range(len(episode_indices["from"])), disable=not verbose):
-        from_idx, to_idx = episode_indices["from"][ep_idx], episode_indices["to"][ep_idx]
-        for idx in range(from_idx, to_idx):
-            frame = dataset[idx]
+    if verbose:
+        if dataset.episodes is None:
+            print(f"Processing {dataset.meta.total_episodes} episodes")
+        else:
+            print(
+                f"Processing {len(selected_episodes)} episodes "
+                f"(filtered from {dataset.meta.total_episodes})"
+            )
+
+    abs_to_rel = dataset.reader._absolute_to_relative_idx
+
+    for ep_idx in tqdm.tqdm(selected_episodes, disable=not verbose):
+        episode_indices = dataset.meta.episodes[ep_idx]
+        start_idx = episode_indices["dataset_from_index"]
+        end_idx = episode_indices["dataset_to_index"]
+        for idx in range(start_idx, end_idx):
+            if abs_to_rel is None:
+                frame = dataset[idx]
+            else:
+                rel_idx = abs_to_rel.get(idx)
+                if rel_idx is None:
+                    continue
+                frame = dataset[rel_idx]
 
             # these are auto-generated, so remove them from the frame
             features_to_drop_list = ["index", "timestamp", "frame_index", "episode_index", "task_index"]

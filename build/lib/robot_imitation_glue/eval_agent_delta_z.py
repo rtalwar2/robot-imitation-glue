@@ -4,12 +4,11 @@ import cv2
 import loguru
 import numpy as np
 import rerun as rr
-import copy
 
 # from lerobot.common.datasets.lerobot_dataset import LeRobotDataset
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from robot_imitation_glue.base import BaseAgent, BaseDatasetRecorder, BaseEnv
-from robot_imitation_glue.collect_data_delta import action_to_tcp_pose, policy_action_to_tcp_pose
+from robot_imitation_glue.collect_data_delta import action_to_tcp_pose
 from robot_imitation_glue.utils import precise_wait
 from robot_imitation_glue.forward_kinematics_helper import forward_kinematics_ur3e
 # create type for callable that takes obs and returns action
@@ -94,6 +93,7 @@ def overlay_all_keypoints(image, attn_tensor, alpha=0.5):
     #     image = (image * 255).astype(np.uint8)
     # else:
     #     image = image.astype(np.uint8)
+
     H_img, W_img = image.shape[:2]
 
     # Upsample all heatmaps at once
@@ -114,7 +114,7 @@ def overlay_all_keypoints(image, attn_tensor, alpha=0.5):
     combined_color = (cv2.applyColorMap(combined_uint8, cv2.COLORMAP_JET)/255.0).astype(np.float32)
 
     # Overlay the heatmap onto the RGB image
-    overlay = cv2.addWeighted(image, 1- alpha, combined_color, alpha, 0)
+    overlay = cv2.addWeighted(image, 1 - alpha, combined_color, alpha, 0)
 
     return image,overlay, combined_uint8, combined_color
 
@@ -279,15 +279,15 @@ def eval(  # noqa: C901
             rr.log("spectogram", rr.Image(spectogram_image))
             action, used_images,attn_maps = policy_agent.get_action(observations)
             rr.log("button/btn_state", rr.Scalar(float(observations["btn_state"])))
-            # rr.log("button/predicted_button_state", rr.Scalar(float(observations["pred_button_state"])))
-            # rr.log(
-            #     "button/debug_text",
-            #     rr.TextDocument(f"""
-            # # Button Debug Info
-            # **Raw button state:** {observations['btn_state']}
-            # **Predicted state:** {float(observations["pred_button_state"])}
-            # """)
-            # )
+            rr.log("button/predicted_button_state", rr.Scalar(float(observations["pred_button_state"])))
+            rr.log(
+                "button/debug_text",
+                rr.TextDocument(f"""
+            # Button Debug Info
+            **Raw button state:** {observations['btn_state']}
+            **Predicted state:** {float(observations["pred_button_state"])}
+            """)
+            )
 
             rr.log("action", rr.Scalar(float(action)))
 
@@ -303,7 +303,7 @@ def eval(  # noqa: C901
                     img_np = img.cpu().numpy().transpose(1, 2, 0)
 
                     rr.log(f"prediction_inputs/obs_{i}/raw", rr.Image(img_np))
-                    image, overlay, heat_gray, heat_color = overlay_all_keypoints(img_np, attn_maps[0][0][i],0.99)
+                    image, overlay, heat_gray, heat_color = overlay_all_keypoints(img_np, attn_maps[0][0][i],0.7)
                     rr.log(f"prediction_inputs/obs_{i}/attention", rr.Image(overlay))
 
 
@@ -347,21 +347,21 @@ def eval(  # noqa: C901
                 env.act(action[0:6],gripper_target,time.time() +5)
 
 
-def generate_deterministic_poses(base_pose, env, count=20, xy_range=0.05, z_range=0.05,seed=42):
+def generate_deterministic_poses(base_pose, env, count=20, xy_range=0.05, z_range=0.05):
     """
     Generates a list of deterministic poses based on a fixed seed.
     Returns exactly 'count' reachable poses.
     """
     poses = []
     # Use a fixed seed (42) so this sequence is identical every time you run the script
-    rng = np.random.RandomState(seed)
+    rng = np.random.RandomState(42) 
     
     attempts = 0
     while len(poses) < count and attempts < 1000:
         attempts += 1
         
-        # 1. Deterministic Rotation (Uniform 0 to 180 degrees around Z)
-        theta = rng.uniform(-np.pi, 0)
+        # 1. Deterministic Rotation (Uniform -90 to 90)
+        theta = rng.uniform(-np.pi/2, np.pi/2)
         Rz = np.array([
             [np.cos(theta), -np.sin(theta), 0, 0],
             [np.sin(theta),  np.cos(theta), 0, 0],
@@ -387,286 +387,6 @@ def generate_deterministic_poses(base_pose, env, count=20, xy_range=0.05, z_rang
         
     return poses
 
-def eval_xyz_auto(  # noqa: C901
-    env: BaseEnv,
-    policy_agent: BaseAgent,
-    recorder: BaseDatasetRecorder,
-    fps=10,
-    env_observation_image_key: str = "scene",
-    env_spectogram_key:str = "spectogram_image",
-):
-    """
-    Evalulate a (policy) agent on a robot environment.
-
-    You should also specify a teleop agent which allows to move the robot arm between policy rollouts to set the initial state.
-
-    Rollouts are recorded using the provided dataset recorder.
-
-    You can provide a dataset to load the initial scene image from. This is useful to evaluate the policy on a specific scene.
-
-    Args:
-        env: robot environment
-        teleop_agent: teleop agent
-        policy_agent: policy agent
-        recorder: dataset recorder
-        policy_to_pose_converter: function to convert policy action to robot pose
-        teleop_to_pose_converter: function to convert teleop action to robot pose
-        fps: frames per second for the dataset recorder
-        eval_dataset: dataset to load initial scene image from
-        eval_dataset_image_key: key in the dataset to load the image from
-
-    """
-    state = State()
-    event = Event()
-    listener = init_keyboard_listener(event, state)
-
-    rr.init("robot_imitation_glue")
-    rr.spawn(memory_limit="5GB")
-
-    control_period = 1 / fps
-    num_rollouts = recorder.n_recorded_episodes
-
-    # --- 1. Load Camera & Detect Button Center (Run once) ---
-    # from airo_dataset_tools.data_parsers.pose import Pose
-    # camera_pose_path = "camera_pose_Daniilidis.json"
-
-    # with open(camera_pose_path, "r") as f:
-    #     camera_pose = Pose.model_validate_json(f.read()).as_homogeneous_matrix()
-
-    button_detector = ButtonDetector(env.get_camera_intrinsics(),X_TCP_C=None)
-
-    # def collect_rgbd_and_tcp_pose(joints: JointConfigurationType
-    # ) -> Tuple[NumpyIntImageType, NumpyDepthMapType, HomogeneousMatrixType]:
-    #     env.move_robot_to_joint_config(joints,0,wait=True)
-    #     observation = env.get_observations()
-    #     image = observation["wrist_image_original"]
-    #     depth_map = env.get_depth_map()
-    #     X_B_TCP = env.get_robot_pose_se3()
-    #     return image, depth_map, X_B_TCP
-    # # collect images
-    # image_depth_X_B_TCP = [collect_rgbd_and_tcp_pose(joints) for joints in button_detector.joint_positions] 
-
-    # # detect button
-    # image_and_detections=[]
-    # for img,depth,X_B_TCP in image_depth_X_B_TCP:
-    #     results = button_detector.detect_button_ML(img,depth,X_B_TCP )
-    #     if results:
-    #         image_and_detections.append(results)
-
-    # # calculate button position in world frame
-    # detected_3d_button_positions = button_detector.get_3d_coordinates_of_pixels_with_depth(image_and_detections)
-    # print(f"detected button position = {detected_3d_button_positions}")
-
-    env.robot.rtde_control.teachMode()
-    input("go above button position")
-    # detected_3d_button_positions = env.get_robot_pose_se3()[:3,3]
-    # detected_3d_button_positions =[-0.48606219, -0.02978124 , 0.10837631] #red_round_button_big
-
-    # detected_3d_button_positions = [-0.48683923, -0.04199,  0.07724089] #blue round button small -5.0102754  -1.9349806
-    # detected_3d_button_positions = [-0.49176621, -0.00877,  0.07627462]#white_switch -7.1233974  -7.1400385
-    # detected_3d_button_positions = [-0.48892, -0.05575,  0.05628161]#red_switch  -3.424103 -3.456027
-    detected_3d_button_positions = [-0.48853 ,-0.03907   ,0.06231323]#red round button small mean median -1.0321696 -0.8254056
-
-    # #env.get_robot_pose_se3()[:3,3]
-    env.robot.rtde_control.endTeachMode()
-    print(f"detected button position = {detected_3d_button_positions}")
-    # pre_touching_pose = button_detector.get_pretouch_position(detected_3d_button_positions)
-    # Define the center point for randomization
-    pre_touching_pose = button_detector.get_pretouch_position(detected_3d_button_positions)
-    env.move_robot_to_tcp_pose(pre_touching_pose)
-    time.sleep(5)
-    # --- 2. GENERATE DETERMINISTIC POSES ---
-    print("Generating 40 deterministic evaluation poses...")
-    eval_poses = generate_deterministic_poses(pre_touching_pose, env, count=20)
-    print(f"Generated {len(eval_poses)} poses.")
-    def move_to_start_pose_with_negative_z_detour(target_pose):
-        """
-        Move to target start pose with a deterministic orientation policy:
-        - If the target requires a positive yaw turn larger than 90 deg from current,
-            first rotate -90 deg around tool Z at the current position.
-        - Otherwise, move directly to target pose.
-        """
-        R1 = pre_touching_pose[:3, :3]
-        R2 = target_pose[:3, :3]
-        R_diff = R1.T @ R2
-        angle = np.arccos((np.trace(R_diff) - 1) / 2)
-        print("angle between R1 and R2:", np.degrees(angle), "degrees")
-        if np.degrees(angle)>90:
-            print("applying detour because angle is greater than 90 degrees")
-            Rz_minus_90 = np.array(
-                [
-                    [0.0, 1.0, 0.0],
-                    [1.0, 0.0, 0.0],
-                    [0.0, 0.0, -1.0],
-                ]
-            )
-            detour_pose = target_pose.copy()
-            detour_pose[:3, :3] = Rz_minus_90
-
-            if env.is_tcp_pose_reachable(detour_pose):
-                print("Applying negative-Z yaw detour before start pose")
-                env.move_robot_to_tcp_pose(detour_pose)
-
-        env.move_robot_to_tcp_pose(target_pose)
-    try:
-        while not state.is_stopped:
-
-            # Calculate which pose to use based on how many episodes we have recorded
-            # This cycles 0 to 19 repeatedly.
-            current_rollout_idx = recorder.n_recorded_episodes
-            pose_index = current_rollout_idx % len(eval_poses)
-            if current_rollout_idx == len(eval_poses):
-                print("All deterministic poses completed.")
-                raise ValueError("All deterministic poses completed")
-            # pose_index = 36
-            new_pose = eval_poses[pose_index]
-
-            logger.info(f"Moving to Eval Pose #{pose_index+1} / {len(eval_poses)}")
-            
-            # Move robot (no retry logic needed here, we checked reachability in the generator)
-            move_to_start_pose_with_negative_z_detour(new_pose)
-
-            # --- Wait for user to start rollout ---
-            logger.info(f"Ready for Rollout {current_rollout_idx+1}. Press 'Start Rollout'.")
-            event.start_rollout=True
-            while not state.rollout_active:
-                #this whileloop stays the same
-                cycle_end_time = time.time() + control_period
-
-                observations = env.get_observations()
-
-                vis_image = observations[env_observation_image_key].copy()
-                spectogram_image = observations[env_spectogram_key]
-                rr.log("scene", rr.Image(vis_image))
-                rr.log("spectogram", rr.Image(spectogram_image))
-
-                if cycle_end_time > time.time():
-                    precise_wait(cycle_end_time)
-
-                if event.quit:
-                    state.is_stopped = True
-                    listener.stop()
-                    recorder.finish_recording()
-                    logger.info("Stop evaluation")
-                    return
-
-                if event.start_rollout:
-                    state.rollout_active = True
-                event.clear()
-
-            logger.info("Start rollout")
-            recorder.start_episode()
-            button_was_pressed = False
-            # reset to clear action buffers for chunking agents
-            policy_agent.reset()
-            rollout_start_time = time.time()
-            button_press_time = time.time()
-            while not state.is_stopped and state.rollout_active:
-                if time.time() - rollout_start_time > 30:
-                    logger.info("Rollout timed out")
-                    event.stop_rollout = True
-                elif time.time() - button_press_time > 1 and button_was_pressed:
-                    logger.info("Rollout finished")
-                    event.stop_rollout = True
-                cycle_end_time = time.time() + control_period
-
-                observations = env.get_observations()
-                observations = copy.deepcopy(observations)
-                if observations["btn_state"]==0 and not button_was_pressed:    
-                    button_was_pressed = True
-                    button_press_time = time.time()
-                vis_image = observations[env_observation_image_key].copy()
-                spectogram_image = observations[env_spectogram_key]
-                Fz=observations["ft"][2]
-                if Fz>=20:
-                    print(f"stopped rollout because downward force was to big: fz = {Fz}")
-                    state.rollout_active = False
-                    num_rollouts += 1
-                    logger.info(f"Stop rollout {num_rollouts}")
-                    recorder.save_episode()
-                    event.clear()
-                    logger.info(f"Saved episode {recorder.n_recorded_episodes}")
-                    # --- SAFETY RETRACT ---
-                    logger.info("Retracting...")
-                    env.move_robot_to_tcp_pose(pre_touching_pose)
-                ## print number of episodes to image
-                cv2.putText(
-                    vis_image,
-                    f"Episode: {recorder.n_recorded_episodes}",
-                    (10, 30),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.5,
-                    (255, 0, 0),
-                    1,
-                )
-                
-                rr.log("scene", rr.Image(vis_image))
-                rr.log("spectogram", rr.Image(spectogram_image))
-                action, used_images,attn_maps = policy_agent.get_action(observations)
-                rr.log("button/btn_state", rr.Scalars(float(observations["btn_state"])))
-                # rr.log("button/predicted_button_state", rr.Scalars(float(observations["pred_button_state"])))
-                rr.log(
-                    "button/debug_text",
-                #     rr.TextDocument(f"""
-                # # Button Debug Info
-                # **Raw button state:** {observations['btn_state']}
-                # **Predicted state:** {float(observations["pred_button_state"])}
-                # **Pressed in this episode?** {"Yes" if button_was_pressed else "No"}
-                # """)
-                rr.TextDocument(f"""
-                # Button Debug Info
-                **Raw button state:** {observations['btn_state']}
-                **Pressed in this episode?** {"Yes" if button_was_pressed else "No"}
-                """)
-                )
-                # for key,value in observations.items():
-                #     #print key value and shape of value
-                #     logger.debug(f"Observation key: {key}, value shape: {value.shape}, value: {value}")
-
-
-                rr.log("fz", rr.Scalars(float(Fz)))
-
-                if used_images is not None:
-                    # used_images shape: [batch, n_obs_steps, C, H, W]
-                    # assuming batch size 1:
-                    obs_imgs = used_images[0]          # shape [2, C, H, W]
-
-                    for i, img in enumerate(obs_imgs):
-                        # convert tensor → numpy and reshape to HWC
-                        img = img.squeeze(0)  # remove batch dim -> [C, H, W]
-
-                        img_np = img.cpu().numpy().transpose(1, 2, 0)
-
-                        rr.log(f"prediction_inputs/obs_{i}/raw", rr.Image(img_np))
-                        # image, overlay, heat_gray, heat_color = overlay_all_keypoints(img_np, attn_maps[0][0][i],0.99)
-                        # rr.log(f"prediction_inputs/obs_{i}/attention", rr.Image(overlay))
-
-
-                logger.debug(f"policy action: {action}")
-
-                recorder.record_step(observations, action.astype(np.float64))
-                # next_pose = action_to_tcp_pose(env.get_robot_pose_se3(), action)
-                next_pose = policy_action_to_tcp_pose(env.get_robot_pose_se3(), action)
-                if env.is_tcp_pose_reachable(next_pose):
-                    env.act_tcp(next_pose, time.time() + control_period)
-                else:
-                    print("TCP POSE NOT REACHABLE")
-
-
-                if cycle_end_time > time.time():
-                    precise_wait(cycle_end_time)
-                if event.stop_rollout:
-                    state.rollout_active = False
-                    num_rollouts += 1
-                    logger.info(f"Stop rollout {num_rollouts}")
-                    recorder.save_episode()
-                    event.clear()
-                    logger.info(f"Saved episode {recorder.n_recorded_episodes}")
-                    # --- SAFETY RETRACT ---
-                    logger.info("Retracting...")
-                    env.move_robot_to_tcp_pose(pre_touching_pose)
-    finally:
-        recorder.finish_recording()
 
 def eval_xyz(  # noqa: C901
     env: BaseEnv,
@@ -741,13 +461,10 @@ def eval_xyz(  # noqa: C901
     env.robot.rtde_control.teachMode()
     input("go above button position")
     # detected_3d_button_positions = env.get_robot_pose_se3()[:3,3]
-    # detected_3d_button_positions =[-0.48606219, -0.02978124 , 0.10837631] #red_round_button_big
-
-    # detected_3d_button_positions = [-0.48683923, -0.04199,  0.07724089] #blue round button small -5.0102754  -1.9349806
-    # detected_3d_button_positions = [-0.49176621, -0.00877,  0.07627462]#white_switch -7.1233974  -7.1400385
-    # detected_3d_button_positions = [-0.48892, -0.05575,  0.05628161]#red_switch  -3.424103 -3.456027
-    detected_3d_button_positions = [-0.48853 ,-0.03907   ,0.06231323]#red round button small mean median -1.0321696 -0.8254056
-
+    # detected_3d_button_positions = [-0.08719641 ,-0.37431874 , 0.039637  ]
+    detected_3d_button_positions = [-0.0769199 , -0.38387986  ,0.04016958]
+    #[-0.02903111 ,-0.40018098 , 0.03766195]
+    # detected_3d_button_positions =  [ 0.06598392 ,-0.35092692 , 0.03709084]
     # #env.get_robot_pose_se3()[:3,3]
     env.robot.rtde_control.endTeachMode()
     print(f"detected button position = {detected_3d_button_positions}")
@@ -758,37 +475,8 @@ def eval_xyz(  # noqa: C901
     time.sleep(5)
     # --- 2. GENERATE DETERMINISTIC POSES ---
     print("Generating 40 deterministic evaluation poses...")
-    eval_poses = generate_deterministic_poses(pre_touching_pose, env, count=20)
+    eval_poses = generate_deterministic_poses(pre_touching_pose, env, count=40)
     print(f"Generated {len(eval_poses)} poses.")
-    def move_to_start_pose_with_negative_z_detour(target_pose):
-        """
-        Move to target start pose with a deterministic orientation policy:
-        - If the target requires a positive yaw turn larger than 90 deg from current,
-            first rotate -90 deg around tool Z at the current position.
-        - Otherwise, move directly to target pose.
-        """
-        R1 = pre_touching_pose[:3, :3]
-        R2 = target_pose[:3, :3]
-        R_diff = R1.T @ R2
-        angle = np.arccos((np.trace(R_diff) - 1) / 2)
-        print("angle between R1 and R2:", np.degrees(angle), "degrees")
-        if np.degrees(angle)>90:
-            print("applying detour because angle is greater than 90 degrees")
-            Rz_minus_90 = np.array(
-                [
-                    [0.0, 1.0, 0.0],
-                    [1.0, 0.0, 0.0],
-                    [0.0, 0.0, -1.0],
-                ]
-            )
-            detour_pose = target_pose.copy()
-            detour_pose[:3, :3] = Rz_minus_90
-
-            if env.is_tcp_pose_reachable(detour_pose):
-                print("Applying negative-Z yaw detour before start pose")
-                env.move_robot_to_tcp_pose(detour_pose)
-
-        env.move_robot_to_tcp_pose(target_pose)
     try:
         while not state.is_stopped:
 
@@ -798,14 +486,11 @@ def eval_xyz(  # noqa: C901
             pose_index = current_rollout_idx % len(eval_poses)
             # pose_index = 36
             new_pose = eval_poses[pose_index]
-            if current_rollout_idx == len(eval_poses):
-                print("All deterministic poses completed.")
-                raise ValueError("All deterministic poses completed")
 
             logger.info(f"Moving to Eval Pose #{pose_index+1} / {len(eval_poses)}")
             
             # Move robot (no retry logic needed here, we checked reachability in the generator)
-            move_to_start_pose_with_negative_z_detour(new_pose)
+            env.move_robot_to_tcp_pose(new_pose)
 
             # --- Wait for user to start rollout ---
             logger.info(f"Ready for Rollout {current_rollout_idx+1}. Press 'Start Rollout'.")
@@ -837,24 +522,19 @@ def eval_xyz(  # noqa: C901
 
             logger.info("Start rollout")
             recorder.start_episode()
-            button_was_pressed = False
+
             # reset to clear action buffers for chunking agents
             policy_agent.reset()
-            rollout_start_time = time.time()
+
             while not state.is_stopped and state.rollout_active:
-                if time.time() - rollout_start_time > 30:
-                    logger.info("Rollout timed out")
-                    event.stop_rollout = True
                 cycle_end_time = time.time() + control_period
 
                 observations = env.get_observations()
-                observations = copy.deepcopy(observations)
-                if observations["btn_state"]==0 and not button_was_pressed:    
-                    button_was_pressed = True
+
                 vis_image = observations[env_observation_image_key].copy()
                 spectogram_image = observations[env_spectogram_key]
                 Fz=observations["ft"][2]
-                if Fz<=-50:
+                if Fz<=-40:
                     print(f"stopped rollout because downward force was to big: fz = {Fz}")
                     state.rollout_active = False
                     num_rollouts += 1
@@ -880,27 +560,17 @@ def eval_xyz(  # noqa: C901
                 rr.log("spectogram", rr.Image(spectogram_image))
                 action, used_images,attn_maps = policy_agent.get_action(observations)
                 rr.log("button/btn_state", rr.Scalars(float(observations["btn_state"])))
-                # rr.log("button/predicted_button_state", rr.Scalars(float(observations["pred_button_state"])))
+                rr.log("button/predicted_button_state", rr.Scalars(float(observations["pred_button_state"])))
                 rr.log(
                     "button/debug_text",
-                #     rr.TextDocument(f"""
-                # # Button Debug Info
-                # **Raw button state:** {observations['btn_state']}
-                # **Predicted state:** {float(observations["pred_button_state"])}
-                # **Pressed in this episode?** {"Yes" if button_was_pressed else "No"}
-                # """)
-                rr.TextDocument(f"""
+                    rr.TextDocument(f"""
                 # Button Debug Info
                 **Raw button state:** {observations['btn_state']}
-                **Pressed in this episode?** {"Yes" if button_was_pressed else "No"}
+                **Predicted state:** {float(observations["pred_button_state"])}
                 """)
                 )
-                # for key,value in observations.items():
-                #     #print key value and shape of value
-                #     logger.debug(f"Observation key: {key}, value shape: {value.shape}, value: {value}")
 
-
-                rr.log("fz", rr.Scalars(float(Fz)))
+                # rr.log("action", rr.Scalar(float(action)))
 
                 if used_images is not None:
                     # used_images shape: [batch, n_obs_steps, C, H, W]
@@ -914,15 +584,14 @@ def eval_xyz(  # noqa: C901
                         img_np = img.cpu().numpy().transpose(1, 2, 0)
 
                         rr.log(f"prediction_inputs/obs_{i}/raw", rr.Image(img_np))
-                        # image, overlay, heat_gray, heat_color = overlay_all_keypoints(img_np, attn_maps[0][0][i],0.99)
-                        # rr.log(f"prediction_inputs/obs_{i}/attention", rr.Image(overlay))
+                        image, overlay, heat_gray, heat_color = overlay_all_keypoints(img_np, attn_maps[0][0][i],0.7)
+                        rr.log(f"prediction_inputs/obs_{i}/attention", rr.Image(overlay))
 
 
                 logger.debug(f"policy action: {action}")
 
                 recorder.record_step(observations, action.astype(np.float64))
-                # next_pose = action_to_tcp_pose(env.get_robot_pose_se3(), action)
-                next_pose = policy_action_to_tcp_pose(env.get_robot_pose_se3(), action)
+                next_pose = action_to_tcp_pose(env.get_robot_pose_se3(), action)
                 if env.is_tcp_pose_reachable(next_pose):
                     env.act_tcp(next_pose, time.time() + control_period)
                 else:

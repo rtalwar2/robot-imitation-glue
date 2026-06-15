@@ -1,6 +1,26 @@
+from copy import deepcopy
 import os
 from pathlib import Path
+import sys
 
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+
+# Prefer local workspace versions over globally visible packages from other projects.
+_LOCAL_PATHS = [
+    _REPO_ROOT / "airo-mono" / "airo-typing",
+    _REPO_ROOT / "airo-mono" / "airo-spatial-algebra",
+    _REPO_ROOT / "airo-mono" / "airo-robots",
+    _REPO_ROOT / "airo-mono" / "airo-camera-toolkit",
+    _REPO_ROOT / "airo-teleop-agents" / "airo-teleop-agents",
+    _REPO_ROOT / "airo-teleop-agents" / "airo-teleop-devices",
+]
+for _path in _LOCAL_PATHS:
+    _path_str = str(_path)
+    if _path_str not in sys.path:
+        sys.path.insert(0, _path_str)
+
+from airo_teleop_agents.gello_teleop_agents import Gello4UR
+from airo_teleop_devices.gello_teleop_device import GelloTeleopDevice
 from robot_imitation_glue.agents.gello.gello_agent import GelloAgent
 import numpy as np  # Missing import for np
 from robot_imitation_glue.agents.gello.gello_agent import DynamixelConfig
@@ -10,7 +30,7 @@ from scipy.spatial.transform import Rotation as R
 from robot_imitation_glue.collect_data import collect_data, teleoperate
 from robot_imitation_glue.collect_data_delta import collect_data_xyz
 from robot_imitation_glue.dataset_recorder import LeRobotDatasetRecorder
-from robot_imitation_glue.uR3station.robot_env import UR3eStation
+from robot_imitation_glue.ur5station.ur5_robot_env import UR5eStation
 
 
 
@@ -61,26 +81,24 @@ def abs_se3_to_relative_policy_action_converter(robot_pose, gripper_pose, abs_se
 if __name__ == "__main__":
     # create dummy env, agent and recorder to test flow.
 
-    env = UR3eStation(with_instrumentation=True)
+    env = UR5eStation()
 
     dataset_name = "delme5"
 
-    config = DynamixelConfig(
-        joint_ids=(1, 2, 3, 4, 5, 6),
-        joint_offsets=[4*np.pi/2, 2*np.pi/2, 0*np.pi/2, -3*np.pi/2, 2*np.pi/2, 7*np.pi/2 ],
-        joint_signs=(1, 1, -1, 1, 1, 1),
-        gripper_config=(7, 195, 154),
+    gello_config = deepcopy(GelloTeleopDevice.GELLO1_DEFAULT_CONFIG)
+    agent = Gello4UR(
+        gello_usb_port="/dev/serial/by-id/usb-FTDI_USB__-__Serial_Converter_FT792AL6-if00-port0",
+        gello_config=gello_config,
+        ur_robot=env.robot,
+        use_joint_space=True,
     )
-
     input("are you ready?")
-    start_joints = np.concatenate((env.robot.get_joint_configuration(),env.get_gripper_opening()),axis=0)
-    agent = GelloAgent(config, "/dev/serial/by-id/usb-FTDI_USB__-__Serial_Converter_FT792AL6-if00-port0",start_joints)
 
     # if not os.path.exists("datasets"):
     #     os.makedirs("datasets")
     dataset_recorder = LeRobotDatasetRecorder(
         example_obs_dict=env.get_observations(),
-        example_action=np.zeros((9,), dtype=np.float32),
+        example_action=np.zeros((7,), dtype=np.float32),
         root_dataset_dir=Path(f"datasets/{dataset_name}"),
         dataset_name=dataset_name,
         fps=10,
@@ -89,15 +107,19 @@ if __name__ == "__main__":
 
     # print(dataset_recorder.state_keys)
 
-    collect_data(
+    # collect_data(
+    #     env,
+    #     agent,
+    #     dataset_recorder,
+    #     10,
+    #     delta_action_to_abs_se3_converter,
+    #     abs_se3_to_relative_policy_action_converter,
+    # )
+    collect_data_xyz(
         env,
-        agent,
         dataset_recorder,
         10,
-        delta_action_to_abs_se3_converter,
-        abs_se3_to_relative_policy_action_converter,
     )
-
     # teleoperate(
     #     env,
     #     agent

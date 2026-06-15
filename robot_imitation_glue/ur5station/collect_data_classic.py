@@ -1,6 +1,32 @@
+from copy import deepcopy
 import os
 from pathlib import Path
+import sys
 
+from airo_teleop_agents.phone_teleop_agents import Phone4PositionManipulator
+from airo_teleop_phone.config_phone import PhoneConfig, PhoneOS
+from robot_imitation_glue.ur5station.data_collection import abs_se3_to_policy_action_converter
+from robot_imitation_glue.button_detector.ButtonDetector import ButtonDetector
+from robot_imitation_glue.eval_agent_delta_z import generate_deterministic_poses
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+
+# Prefer local workspace versions over globally visible packages from other projects.
+_LOCAL_PATHS = [
+    _REPO_ROOT / "airo-mono" / "airo-typing",
+    _REPO_ROOT / "airo-mono" / "airo-spatial-algebra",
+    _REPO_ROOT / "airo-mono" / "airo-robots",
+    _REPO_ROOT / "airo-mono" / "airo-camera-toolkit",
+    _REPO_ROOT / "airo-teleop-agents" / "airo-teleop-agents",
+    _REPO_ROOT / "airo-teleop-agents" / "airo-teleop-devices",
+]
+for _path in _LOCAL_PATHS:
+    _path_str = str(_path)
+    if _path_str not in sys.path:
+        sys.path.insert(0, _path_str)
+
+from airo_teleop_agents.gello_teleop_agents import Gello4UR
+from airo_teleop_devices.gello_teleop_device import GelloTeleopDevice
 from robot_imitation_glue.agents.gello.gello_agent import GelloAgent
 import numpy as np  # Missing import for np
 from robot_imitation_glue.agents.gello.gello_agent import DynamixelConfig
@@ -8,9 +34,9 @@ from scipy.spatial.transform import Rotation as R
 
 # from robot_imitation_glue.agents.spacemouse_agent import SpaceMouseAgent
 from robot_imitation_glue.collect_data import collect_data, teleoperate
-from robot_imitation_glue.collect_data_delta import collect_data_xyz
+from robot_imitation_glue.collect_data_delta import collect_data_xyz, collect_data_xyz_red_switch, collect_data_xyz_white_switch
 from robot_imitation_glue.dataset_recorder import LeRobotDatasetRecorder
-from robot_imitation_glue.uR3station.robot_env import UR3eStation
+from robot_imitation_glue.ur5station.ur5_robot_env import UR5eStation
 
 
 
@@ -59,49 +85,50 @@ def abs_se3_to_relative_policy_action_converter(robot_pose, gripper_pose, abs_se
 
 
 if __name__ == "__main__":
+
+    env = UR5eStation(with_instrumentation=True,with_spectogram_model=False,use_internal_ft=True)
+
+    dataset_name = "testing_phone_datacollection"
+
     # create dummy env, agent and recorder to test flow.
-
-    env = UR3eStation(with_instrumentation=True)
-
-    dataset_name = "delme5"
-
-    config = DynamixelConfig(
-        joint_ids=(1, 2, 3, 4, 5, 6),
-        joint_offsets=[4*np.pi/2, 2*np.pi/2, 0*np.pi/2, -3*np.pi/2, 2*np.pi/2, 7*np.pi/2 ],
-        joint_signs=(1, 1, -1, 1, 1, 1),
-        gripper_config=(7, 195, 154),
+    PHONE_OS = PhoneOS.ANDROID  # or PhoneOS.IOS
+    ENABLE_TRANSLATIONS = True
+    ENABLE_ROTATIONS = True
+    phone_config = PhoneConfig(phone_os=PHONE_OS)
+    
+    teleop_agent = Phone4PositionManipulator(
+    position_manipulator=env.robot,
+    phone_config=phone_config,
+    translation_scale=0.5,
+    rotation_scale=1.0,
+    phone_forward_axis = "-x",
+    enable_settle_time_s= 0.25,
+    max_translation_step_m= 0.03,
+    max_rotation_step_rad= 0.35,
+    enabled_axes=[ENABLE_TRANSLATIONS] * 3 + [ENABLE_ROTATIONS] * 3,
+    auto_connect=True,
     )
-
-    input("are you ready?")
-    start_joints = np.concatenate((env.robot.get_joint_configuration(),env.get_gripper_opening()),axis=0)
-    agent = GelloAgent(config, "/dev/serial/by-id/usb-FTDI_USB__-__Serial_Converter_FT792AL6-if00-port0",start_joints)
-
     # if not os.path.exists("datasets"):
     #     os.makedirs("datasets")
     dataset_recorder = LeRobotDatasetRecorder(
         example_obs_dict=env.get_observations(),
-        example_action=np.zeros((9,), dtype=np.float32),
-        root_dataset_dir=Path(f"datasets/{dataset_name}"),
+        example_action=np.zeros((10,), dtype=np.float64),
+        root_dataset_dir=Path(f"datasets/expert/{dataset_name}"),
         dataset_name=dataset_name,
         fps=10,
         use_videos=True,
     )
 
-    # print(dataset_recorder.state_keys)
-
+    # input("are you ready?")
     collect_data(
         env,
-        agent,
+        teleop_agent,
         dataset_recorder,
         10,
         delta_action_to_abs_se3_converter,
-        abs_se3_to_relative_policy_action_converter,
+        abs_se3_to_policy_action_converter,
     )
 
-    # teleoperate(
-    #     env,
-    #     agent
-    # )
 
     env.close()
-    agent.close()
+    # agent.close()

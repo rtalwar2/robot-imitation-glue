@@ -4,8 +4,8 @@ import cv2
 import numpy as np
 from PIL import Image
 
-from robot_imitation_glue.button_detector.CVButtonDetector import CVButtonDetector
-from robot_imitation_glue.button_detector.MLButtonDetector import MLButtonDetector
+# from robot_imitation_glue.button_detector.CVButtonDetector import CVButtonDetector
+# from robot_imitation_glue.button_detector.MLButtonDetector import MLButtonDetector
 
 
 class ButtonDetector:
@@ -19,10 +19,10 @@ class ButtonDetector:
         self.joint_positions.append([0.99173224,-1.68089165,0.62467462,-1.04109986,-1.41380197,-3.40248639])
         self.joint_positions.append([0.32339218,-1.44230221,0.62475044,-0.78069885,-1.21161396,-4.29869467])
         self.joint_positions.append([0.61693847,-1.40380482,0.6125663,-1.10800783,-1.3066085,-3.35280353])
-        self.ML_button_detector = MLButtonDetector(detector_id,segmenter_id)
+        # self.ML_button_detector = MLButtonDetector(detector_id,segmenter_id)
         self.intrinsics=intrinsics
         self.X_TCP_C = X_TCP_C
-        self.cv_button_detector = CVButtonDetector()
+        # self.cv_button_detector = CVButtonDetector()
 
     def detect_button_ML(self,img,depth,X_B_TCP):
         image_array, detections  = self.ML_button_detector.grounded_segmentation(

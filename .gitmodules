@@ -10,3 +10,6 @@
 [submodule "ast"]
 	path = ast
 	url = https://github.com/tlpss/ast.git
+[submodule "airo-teleop-agents"]
+	path = airo-teleop-agents
+	url = https://github.com/rtalwar2/airo-teleop.git

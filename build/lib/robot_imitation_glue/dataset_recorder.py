@@ -1,11 +1,9 @@
 from pathlib import Path
-import shutil
 
 # from lerobot.common.datasets.lerobot_dataset import LeRobotDataset
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
 import numpy as np
-import pyarrow.parquet as pq
 import torch
 
 from robot_imitation_glue.base import BaseDatasetRecorder
@@ -52,93 +50,6 @@ class LeRobotDatasetRecorder(BaseDatasetRecorder):
         },
     }
 
-    @staticmethod
-    def _is_parquet_footer_corruption_error(exc: Exception) -> bool:
-        current = exc
-        visited: set[int] = set()
-        while current is not None and id(current) not in visited:
-            visited.add(id(current))
-            if "Parquet magic bytes not found in footer" in str(current):
-                return True
-            current = current.__cause__ if current.__cause__ is not None else current.__context__
-        return False
-
-    @staticmethod
-    def _find_corrupted_episode_metadata_parquets(dataset_root: Path) -> list[Path]:
-        episodes_dir = dataset_root / "meta" / "episodes"
-        if not episodes_dir.exists():
-            return []
-
-        corrupted_paths: list[Path] = []
-        for parquet_path in sorted(episodes_dir.glob("*/*.parquet")):
-            try:
-                pq.read_metadata(parquet_path)
-            except Exception:
-                corrupted_paths.append(parquet_path)
-        return corrupted_paths
-
-    @staticmethod
-    def _quarantine_corrupted_episode_metadata(dataset_root: Path, corrupted_paths: list[Path]) -> list[Path]:
-        if len(corrupted_paths) == 0:
-            return []
-
-        episodes_dir = dataset_root / "meta" / "episodes"
-        quarantine_dir = dataset_root / "meta" / "episodes_corrupt"
-        moved_paths: list[Path] = []
-
-        for parquet_path in corrupted_paths:
-            rel_path = parquet_path.relative_to(episodes_dir)
-            target_path = quarantine_dir / rel_path
-            target_path.parent.mkdir(parents=True, exist_ok=True)
-            shutil.move(str(parquet_path), str(target_path))
-            moved_paths.append(target_path)
-
-        return moved_paths
-
-    def _resume_dataset_with_auto_repair(self) -> LeRobotDataset:
-        try:
-            return LeRobotDataset.resume(
-                repo_id=self.dataset_name,
-                root=self.root_dataset_dir,
-                image_writer_processes=0,
-                image_writer_threads=16,
-            )
-        except Exception as exc:
-            if not self._is_parquet_footer_corruption_error(exc):
-                raise
-
-            print("Resume failed due to corrupted parquet footer in meta/episodes. Attempting repair.")
-            corrupted_paths = self._find_corrupted_episode_metadata_parquets(self.root_dataset_dir)
-            if len(corrupted_paths) == 0:
-                raise
-
-            moved_paths = self._quarantine_corrupted_episode_metadata(self.root_dataset_dir, corrupted_paths)
-            print(
-                "Quarantined corrupted metadata parquet files:\n"
-                + "\n".join([str(path) for path in moved_paths])
-            )
-            print("Retrying dataset resume after metadata repair.")
-            return LeRobotDataset.resume(
-                repo_id=self.dataset_name,
-                root=self.root_dataset_dir,
-                image_writer_processes=0,
-                image_writer_threads=16,
-            )
-
-    def _cleanup_interrupted_episode_image_dirs(self, episode_index: int) -> None:
-        # If a previous run crashed mid-episode, stale frame PNGs can remain on disk.
-        # Remove pending temp image dirs for the next episode index before recording.
-        for image_key in self.image_keys:
-            image_dir = (
-                self.root_dataset_dir
-                / "images"
-                / image_key
-                / f"episode-{episode_index:06d}"
-            )
-            if image_dir.is_dir():
-                shutil.rmtree(image_dir)
-                print(f"Removed stale interrupted image directory: {image_dir}")
-
     def __init__(
         self,
         example_obs_dict: dict,
@@ -158,7 +69,6 @@ class LeRobotDatasetRecorder(BaseDatasetRecorder):
 
         self.image_keys = []
         self.state_keys = []
-        self.dataset_meta_info_path = self.root_dataset_dir / "meta" / "info.json"
 
         # create features  using the example dict. assume all numpy arrays. 0D is a scalar, 1D with size 1 is a scalar, 1D with size > 1 is a vector, 3D is an image.
         features = self.DEFAULT_FEATURES.copy()
@@ -188,11 +98,11 @@ class LeRobotDatasetRecorder(BaseDatasetRecorder):
         features["action"] = {"dtype": "float64", "shape": example_action.shape, "names": None}
         print(f"Features: {features}")
 
-        if self.dataset_meta_info_path.exists():
-            print(f"Dataset {dataset_name} already exists. Resuming it.")
-            self.lerobot_dataset = self._resume_dataset_with_auto_repair()
+        if self.root_dataset_dir.exists():
+            print(f"Dataset {dataset_name} already exists. Loading it.")
+            self.lerobot_dataset = LeRobotDataset(repo_id=dataset_name, root=self.root_dataset_dir)
+            self.lerobot_dataset.start_image_writer(num_processes=0, num_threads=16)
             self._n_recorded_episodes = self.lerobot_dataset.meta.total_episodes
-            self._cleanup_interrupted_episode_image_dirs(self._n_recorded_episodes)
             print(f"Loaded {self._n_recorded_episodes} episodes.")
         else:
             print(f"Dataset {dataset_name} does not exist. Creating it.")

@@ -162,34 +162,15 @@ def collect_data(  # noqa: C901
         # print(f"spectogram image shape: {observation['spectogram_image'].shape}")
         # rr.log("scene_image", rr.Image(observation["scene_image"], rr.ColorModel.RGB))
         rr.log("joints", rr.TextLog(str(observation["joints"])))
-        rr.log("btn_state", rr.Scalars(float(observation["btn_state"])))
+        rr.log("btn_state", rr.Scalar(float(observation["btn_state"])))
         # if paused, do not collect teleop or execute action
         if state.is_paused:
             time.sleep(0.1)
             continue
 
-        ee_pose = teleop_agent.get_action()
-        logger.info(f"Action: {ee_pose}")
-        raw = teleop_agent.teleop_device.last_raw_inputs
-        if raw["startRecording"]:
-            if not raw["move"]:
-                logger.info("Start recording event triggered by teleop device input.")
-                event.start_recording = True
-            else:
-                state.is_recording = True
-        
-        elif raw["stopRecording"]:
-            logger.info("Stop recording event triggered by teleop device input.")
-            event.stop_recording = True
-        for key,value in raw.items():
-            logger.info(f"phone raw input {key}: {value}")
+        action = teleop_agent.get_action(observation)
+        logger.info(f"Action: {action}")
 
-#             2026-06-12 17:02:53.244 | INFO     | robot_imitation_glue.collect_data:collect_data:181 - phone raw input move: False
-# 2026-06-12 17:02:53.244 | INFO     | robot_imitation_glue.collect_data:collect_data:181 - phone raw input scale: 1.0
-# 2026-06-12 17:02:53.244 | INFO     | robot_imitation_glue.collect_data:collect_data:181 - phone raw input reservedButtonA: False
-# 2026-06-12 17:02:53.244 | INFO     | robot_imitation_glue.collect_data:collect_data:181 - phone raw input reservedButtonB: False
-# 2026-06-12 17:02:53.244 | INFO     | robot_imitation_glue.collect_data:collect_data:181 - phone raw input startRecording: True
-# 2026-06-12 17:02:53.244 | INFO     | robot_imitation_glue.collect_data:collect_data:181 - phone raw input stopRecording: False
         # new_robot_target_se3_pose, new_gripper_target_width = teleop_to_pose_converter(
         #     target_pose, target_gripper_state, action
         # )
@@ -205,13 +186,15 @@ def collect_data(  # noqa: C901
 
         # print(policy_formatted_action)
         # print(policy_formatted_action.shape)
-        # gripper_target = (1-action[-1])*0.085
-        env.act_tcp(new_pose=ee_pose,timestamp=time.time() + control_period)
+        gripper_target = (1-action[-1])*0.085
+        env.act(
+            robot_joints=action[0:6],
+            gripper_pose=gripper_target,
+            timestamp=time.time() + control_period,
+        )
 
         if state.is_recording:
-            action = abs_pose_to_policy_action(None, None, ee_pose, 0)
-            action = action.astype(np.float64)
-            dataset_recorder.record_step(observation, action)
+            dataset_recorder.record_step(observation, np.concatenate((action[0:6],np.array([gripper_target])),axis=0))
 
         # wait for end of the control period
         if cycle_end_time > time.time():

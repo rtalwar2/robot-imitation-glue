@@ -8,13 +8,6 @@ import time
 from copy import deepcopy
 from pathlib import Path
 
-import torch
-from transformers import ASTForAudioClassification
-
-from robot_imitation_glue.hardware.ipc_btn import BTNSubscriber
-from robot_imitation_glue.hardware.ipc_ft import FTSubscriber
-from robot_imitation_glue.hardware.ipc_mic import SpectrogramSubscriberKaldi
-
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
 # Prefer local workspace versions over globally visible packages from other projects.
@@ -77,10 +70,7 @@ class CameraFactory:
 
 class UR5eStation(BaseEnv):
 
-    def __init__(self,with_instrumentation=False,with_spectogram_model=True,use_internal_ft=False):
-        self.with_instrumentation = with_instrumentation
-        self.with_spectogram_model = with_spectogram_model
-        self.use_internal_ft = use_internal_ft
+    def __init__(self):
         logger.info("connecting to robot.")
         self.robot = URrtde(ROBOT_IP, URrtde.UR3E_CONFIG, gripper=None)
 
@@ -100,72 +90,8 @@ class UR5eStation(BaseEnv):
             WRIST_CAM_RESOLUTION_TOPIC,
             WRIST_CAM_RGB_TOPIC,
         )
-        if not self.use_internal_ft:
-            logger.info("creating FT subscriber")
-            self.ft_subscriber = FTSubscriber("FT")
-
-
-        logger.info("creating spectogram subscriber")
-        self.spectogram_subscriber = SpectrogramSubscriberKaldi("KaldiSpectrogram")
-
-        if self.with_instrumentation:
-            logger.info("creating button subscriber")
-            self.button_subscriber = BTNSubscriber("BTN")
-
-        if self.with_spectogram_model:
-            # Path to your saved model (usually the checkpoint folder with best metrics)
-            # e.g., "./ast_delta_z/checkpoint-1900" or just "./ast_delta_z" if you saved the final model there
-            MODEL_PATH = "/home/rtalwar/robot-imitation-glue/outputs/ramen-noodels/ast_delta_xyz_button_click_detector" 
-
-            # MUST match the values printed during training
-            self.TRAIN_MEAN = 0.6460392475170917
-            self.TRAIN_STD  = 0.06145321258655634
-
-            # Define labels (Update these to match your actual classes)
-            ID2LABEL = {
-                0: "Class_0",
-                1: "Class_1"
-            }
-
-            # Select device
-            self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-            print(f"Inference running on: {self.device}")
-
-
-            # ---------------------------------------------------------
-            # 2. Load Model
-            # ---------------------------------------------------------
-
-            # The config saved in MODEL_PATH already contains the customized 
-            # max_length (298) and architecture changes.
-            self.model = ASTForAudioClassification.from_pretrained(MODEL_PATH)
-            self.model.to(self.device)
-            self.model.eval() # Set to evaluation mode (freezes Dropout, Batchnorm, etc.)
-
-            print("Model loaded successfully.")
 
         time.sleep(2)
-
-    def preprocess_spectrogram(self,spectrogram_array):
-        """
-        Prepares a raw numpy spectrogram for the AST model.
-        Expected Input Shape: (Time, Freq) -> e.g., (298, 128)
-        """
-        # 1. Convert to numpy if not already
-        spec = np.array(spectrogram_array, dtype=np.float32)
-
-        # 2. Apply the EXACT same normalization as training
-        # norm(x) = (x - mean) / (std * 2)
-        spec_normalized = (spec - self.TRAIN_MEAN) / (self.TRAIN_STD * 2)
-
-        # 3. Convert to PyTorch Tensor
-        tensor = torch.tensor(spec_normalized)
-
-        # 4. Add Batch Dimension if missing: (298, 128) -> (1, 298, 128)
-        if tensor.ndim == 2:
-            tensor = tensor.unsqueeze(0)
-            
-        return tensor.to(self.device)
 
     def get_joint_configuration(self):
         return self.robot.get_joint_configuration()
@@ -193,107 +119,24 @@ class UR5eStation(BaseEnv):
     def get_gripper_opening(self):
         return np.array([0.0], dtype=np.float32)
 
-    def get_camera_intrinsics(self):
-        self._wrist_camera_subscriber._grab_images()
-        return self._wrist_camera_subscriber.intrinsics_matrix() #also possible from rgb camera subscriber
-
-    # def get_observations(self):
-    #     start_time = time.time()
-    #     wrist_image = self._wrist_camera_subscriber.get_rgb_image_as_int()
-    #     robot_state = self.get_robot_pose_euler().astype(np.float32)
-    #     joints = self.robot.get_joint_configuration().astype(np.float32)
-    #     wrist_image_resized = cv2.resize(wrist_image, (320, 240), interpolation=cv2.INTER_CUBIC)
-
-    #     obs_dict = {
-    #         "wrist_image_original": wrist_image,
-    #         "wrist_image": wrist_image_resized,
-    #         "state": robot_state,
-    #         "robot_pose": robot_state,
-    #         "joints": joints,
-    #     }
-    #     logger.info(f"get_observations time: {time.time() - start_time}")
-
-    #     return obs_dict
     def get_observations(self):
-
+        start_time = time.time()
         wrist_image = self._wrist_camera_subscriber.get_rgb_image_as_int()
-        spectogram_rgb_image,spectogram_values = self.spectogram_subscriber.get_spectogram()
-        # print(spectogram_image)
-        # scene_image = self._scene_camera_subscriber.get_rgb_image_as_int()
         robot_state = self.get_robot_pose_euler().astype(np.float32)
-        gripper_state = self.get_gripper_opening().astype(np.float32)
         joints = self.robot.get_joint_configuration().astype(np.float32)
-        if self.use_internal_ft:
-            ft = np.array(self.robot.rtde_receive.getActualTCPForce()).astype(np.float32)
-        else:
-            ft = self.ft_subscriber.get_FT()
+        wrist_image_resized = cv2.resize(wrist_image, (320, 240), interpolation=cv2.INTER_CUBIC)
 
-        # TODO: resize images (but still include the original?)
-
-        # resize wrist images to 224x224
-        # print(wrist_image.shape)
-        # wrist_image_resized = cv2.resize(wrist_image, (224, 224))
-        wrist_image_resized = cv2.resize(wrist_image, (320, 240))
-        # resize scene img, cut first 200 x pixels
-        # scene_image_resized = scene_image.copy()
-        # scene_image_resized = scene_image_resized[:, 200:]
-        # resize scene image to 224x224
-        # scene_image_resized = cv2.resize(scene_image_resized, (224, 224))
-
-        state = np.concatenate((joints, gripper_state), axis=0)
         obs_dict = {
             "wrist_image_original": wrist_image,
-            # "scene_image_original": scene_image,
             "wrist_image": wrist_image_resized,
-            # "scene_image": scene_image_resized,
-            "spectogram_image": spectogram_rgb_image,
-            "spectogram_values": spectogram_values,
-            "state": state,
+            "state": robot_state,
             "robot_pose": robot_state,
-            "gripper_state": gripper_state,
             "joints": joints,
-            "ft": ft,
         }
-
-        if self.with_instrumentation:
-            button = self.button_subscriber.get_button_state()
-            # print(button)
-
-            obs_dict["btn_state"] = button
-            state = np.concatenate((state, button), axis=0)
-
-        if self.with_spectogram_model:
-            inputs = self.preprocess_spectrogram(spectogram_values[:,:,0])
-            with torch.no_grad():
-                # Pass input_values specifically (AST expects this argument name)
-                outputs = self.model(input_values=inputs)
-                
-                # Get Logits
-                logits = outputs.logits
-                
-                # Convert to Probabilities (Softmax)
-                probs = torch.nn.functional.softmax(logits, dim=-1)
-                
-                # Get Predicted Class
-                pred_idx = torch.argmax(probs, dim=-1).item()
-                obs_dict["pred_button_state"]=np.array([pred_idx],"float32")
-
-        # obs_dict["state"] = state
-
-        # print(f"the state type is {state.dtype}")
-        for k in obs_dict.keys():
-            obs_dict[k]=obs_dict[k].copy()
+        logger.info(f"get_observations time: {time.time() - start_time}")
 
         return obs_dict
-    def is_tcp_pose_reachable(self,new_pose):
-        return self.robot.is_tcp_pose_reachable(new_pose)
-    
-    def act_tcp(self,new_pose,timestamp):
-        current_time = time.time()
-        duration = timestamp - current_time
-        self.robot.servo_to_tcp_pose(new_pose, duration)
-        return
-    
+
     def act(self, robot_joints, timestamp):
 
         # normal joint space

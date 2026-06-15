@@ -14,12 +14,21 @@ from airo_camera_toolkit.utils.image_converter import ImageConverter
 from airo_ipc.cyclone_shm.idl_shared_memory.base_idl import BaseIDL
 from airo_ipc.cyclone_shm.patterns.ddsreader import DDSReader
 from airo_ipc.cyclone_shm.patterns.sm_reader import SMReader
-from airo_ipc.framework.framework import IpcKind, initialize_ipc
+from airo_ipc.framework.framework import IpcKind
 from airo_ipc.framework.node import Node
 from airo_typing import CameraIntrinsicsMatrixType, CameraResolutionType, NumpyFloatImageType, NumpyIntImageType
 from cyclonedds.domain import DomainParticipant
 from cyclonedds.idl import IdlStruct
 from loguru import logger
+
+
+def initialize_ipc() -> None:
+    """Backward-compatible no-op.
+
+    Newer versions of ``airo-ipc`` initialize resources lazily in readers/writers.
+    Existing call sites in this repository still invoke ``initialize_ipc()``.
+    """
+    return
 
 
 @dataclass
@@ -145,9 +154,12 @@ class RGBCameraSubscriber(RGBCamera):
             resolution = self._reader_resolution()
             logger.info("Did not yet receive resolution message. Sleeping for 1s...")
             time.sleep(1)
+        self._resolution = (resolution.width, resolution.height)
         self._reader_rgb = SMReader(
             self._cyclone_dp, rgb_topic, RGBFrame.with_resolution(resolution.width, resolution.height)
         )
+        # IPC stream does not currently publish fps metadata; keep a reasonable default.
+        self._fps = 30
 
     @property
     def resolution(self) -> CameraResolutionType:
@@ -161,6 +173,10 @@ class RGBCameraSubscriber(RGBCamera):
 
     def intrinsics_matrix(self) -> CameraIntrinsicsMatrixType:
         return self._intrinsics_matrix
+
+    @property
+    def fps(self) -> int:
+        return self._fps
 
     def get_timestamp(self) -> float:
         """Get the timestamp of the current image."""
@@ -229,7 +245,22 @@ class CameraFactory:
         # return OpenCVVideoCapture(resolution=(1920, 1080),  fps=30,intrinsics_matrix=np.eye(3))
         from airo_camera_toolkit.cameras.realsense.realsense import Realsense
 
-        return Realsense(resolution=Realsense.RESOLUTION_1080, fps=30)
+        # D405 does not support 1920x1080; try the common working profiles first.
+        # candidate_resolutions = [Realsense.RESOLUTION_720, Realsense.RESOLUTION_480]
+        candidate_resolutions = [Realsense.RESOLUTION_480]
+        last_error = None
+        for resolution in candidate_resolutions:
+            try:
+                logger.info(f"Trying RealSense profile: {resolution} @ 30fps")
+                return Realsense(resolution=resolution, fps=30)
+            except RuntimeError as error:
+                last_error = error
+                logger.warning(f"Failed to start RealSense with {resolution} @ 30fps: {error}")
+
+        raise RuntimeError(
+            "Could not start RealSense camera with supported profiles "
+            f"{candidate_resolutions}. Last error: {last_error}"
+        )
 
 
 if __name__ == "__main__":
@@ -242,19 +273,24 @@ if __name__ == "__main__":
     TOPIC_RESOLUTION = "webcam_resolution"
     logger.info("Creating publisher.")
 
-    publisher = RGBCameraPublisher(CameraFactory.create_camera, TOPIC_RGB,TOPIC_DEPTH, TOPIC_RESOLUTION, 100, True)
+    publisher = RGBCameraPublisher(CameraFactory.create_camera, TOPIC_RGB, TOPIC_DEPTH, TOPIC_RESOLUTION, 100, True)
     logger.info("Starting publisher.")
     publisher.start()
 
     logger.info("Creating subscriber.")
     subscriber = RGBCameraSubscriber(TOPIC_RESOLUTION, TOPIC_RGB)
-    subscriber2 = DepthCameraSubscriber(TOPIC_RESOLUTION, TOPIC_DEPTH)
+    # subscriber2 = DepthCameraSubscriber(TOPIC_RESOLUTION, TOPIC_DEPTH)
 
-    cv2.namedWindow("Webcam", cv2.WINDOW_NORMAL)
+    show_window = True
+    try:
+        cv2.namedWindow("Webcam", cv2.WINDOW_NORMAL)
+    except cv2.error as error:
+        show_window = False
+        logger.warning(f"OpenCV GUI is not available. Running headless without display window: {error}")
 
     while True:
         rgb = subscriber.get_rgb_image_as_int()
-        depth = subscriber2.get_depth_map()
+        # depth = subscriber2.get_depth_map()
         image_timestamp = subscriber.get_timestamp()
         current_time = time.time()
         logger.debug(
@@ -262,11 +298,13 @@ if __name__ == "__main__":
         )
         rgb_cv = ImageConverter.from_numpy_int_format(rgb).image_in_opencv_format
 
-        cv2.imshow("Webcam", rgb_cv)
-        key = cv2.waitKey(1)
-        if key == ord("q"):
-            logger.info("Stopping...")
-            break
-        print(depth)
+        if show_window:
+            cv2.imshow("Webcam", rgb_cv)
+            key = cv2.waitKey(1)
+            if key == ord("q"):
+                logger.info("Stopping...")
+                break
+        # print(depth)
     publisher.stop()
-    cv2.destroyAllWindows()
+    if show_window:
+        cv2.destroyAllWindows()

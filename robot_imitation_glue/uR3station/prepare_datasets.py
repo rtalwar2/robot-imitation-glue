@@ -21,7 +21,7 @@ def features_transform(features):
     # features["observation.images.spectogram_image"] = features.pop("spectogram_image")
     features["observation.images.wrist_image"]["shape"] = (3, 240, 320)
     # features["observation.images.spectogram_image"]["shape"] = (3, image_size, image_size)
-    features["action"]["shape"] = (3,) #deltaz
+    features["action"]["shape"] = (9,) #deltaz
     features.pop("wrist_image_original")
     features.pop("spectogram_image")  # rgb only
     features["observation.audio.spectogram_values"] = features.pop("spectogram_values")  # rgb only
@@ -59,18 +59,18 @@ def joints_frame_transform(frame):
     # new_frame["observation.images.spectogram_image"] = resized_spectogram_image
     new_frame["observation.audio.spectogram_values"] = spectogram_values_image
     new_frame["observation.images.wrist_image"] = resized_wrist_image
-
     return new_frame
 
-l = [25,27,30,33,37,45,50,52,65,80,82,85,89,98]
-l_bottom = [x for x in range(0,201) if x>=100 or x in l]
+# l = [25,27,30,33,37,45,50,52,65,80,82,85,89,98]hf up
+# l_bottom = [x for x in range(0,201) if x>=100 or x in l]
 
-delta_z_automated_final_2=[3,6,7,9,10,11,19,20,22,24,26,28,29,31,32,35,36,37,39,40,42,43,45,46,50,52,54,55,56,57,60,62,64,65,67,68,69,70,70,72,73,74,75,76,77,78,79]
+# delta_z_automated_final_2=[3,6,7,9,10,11,19,20,22,24,26,28,29,31,32,35,36,37,39,40,42,43,45,46,50,52,54,55,56,57,60,62,64,65,67,68,69,70,70,72,73,74,75,76,77,78,79]
 # for z automated final2 dynamic [2,3,14,18,23,31,34,35,36,37,38,39,40,41,42,43,44,43,45,46,50]
 transform_dataset(
-    root_dir="/home/rtalwar/robot-imitation-glue/datasets/delta_xyz_final",
-    new_root_dir="/home/rtalwar/robot-imitation-glue/datasets/delta_xyz_final_rgb_audio",
+    root_dir="/home/rtalwar/robot-imitation-glue/datasets/red_round_button_small_train",
+    new_root_dir="/home/rtalwar/robot-imitation-glue/datasets/prepared_red_round_button_small_audio_75",
     transform_fn=joints_frame_transform,
     transform_features_fn=features_transform,
-    episodes_to_drop=[92],
+    episodes_to_drop=[i for  i in range(75,100)],
 )
+#todo red switch and white switch
