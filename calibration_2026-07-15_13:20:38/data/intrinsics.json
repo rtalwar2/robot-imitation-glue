@@ -1,0 +1,14 @@
+{
+    "image_resolution": {
+        "width": 1920,
+        "height": 1080
+    },
+    "focal_lengths_in_pixels": {
+        "fx": 1397.034423828125,
+        "fy": 1397.80859375
+    },
+    "principal_point_in_pixels": {
+        "cx": 954.64013671875,
+        "cy": 543.4052124023438
+    }
+}
