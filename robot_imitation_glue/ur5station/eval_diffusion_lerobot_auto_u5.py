@@ -21,18 +21,32 @@ import torch
 import numpy as np
 from transformers import ASTForAudioClassification, AutoConfig
 
+# hf download ramen-noodels/red_round_button_small_audio_button --local-dir ./outputs/button_final/ramen-noodels/red_round_button_small_n100_button
+# hf download ramen-noodels/red_round_button_small_n25_button --local-dir ./outputs/button_final/ramen-noodels/red_round_button_small_n25_button
+# hf download ramen-noodels/red_round_button_small_n50_button --local-dir ./outputs/button_final/ramen-noodels/red_round_button_small_n50_button
+# hf download ramen-noodels/red_round_button_small_n75_button --local-dir ./outputs/button_final/ramen-noodels/red_round_button_small_n75_button
+
+# hf download ramen-noodels/red_round_button_small_audio_scratch --local-dir ./outputs/button_final/ramen-noodels/red_round_button_small_n100_scratch
+# hf download ramen-noodels/red_round_button_small_n25_scratch --local-dir ./outputs/button_final/ramen-noodels/red_round_button_small_n25_scratch
+# hf download ramen-noodels/red_round_button_small_n50_scratch --local-dir ./outputs/button_final/ramen-noodels/red_round_button_small_n50_scratch
+# hf download ramen-noodels/red_round_button_small_n75_scratch --local-dir ./outputs/button_final/ramen-noodels/red_round_button_small_n75_scratch
+
+# hf download ramen-noodels/red_round_button_small_audio_pretrained --local-dir ./outputs/button_final/ramen-noodels/red_round_button_small_n100_pretrained
+# hf download ramen-noodels/red_round_button_small_n25_pretrained --local-dir ./outputs/button_final/ramen-noodels/red_round_button_small_n25_pretrained
+# hf download ramen-noodels/red_round_button_small_n50_pretrained --local-dir ./outputs/button_final/ramen-noodels/red_round_button_small_n50_pretrained 
+# hf download ramen-noodels/red_round_button_small_n75_pretrained --local-dir ./outputs/button_final/ramen-noodels/red_round_button_small_n75_pretrained  
 
 
 if __name__ == "__main__":
     # checkpoint_path = "/home/rtalwar/robot-imitation-glue/outputs/ramen-noodels/red_round_button_small_audio_pretrained"
-    checkpoint_path = "/home/rtalwar/robot-imitation-glue/outputs/ramen-noodels/red_round_button_small_n75_button"
+    checkpoint_path = "/home/rtalwar/robot-imitation-glue/outputs/button_final/ramen-noodels/red_round_button_small_n100_scratch"
     # train_dataset_path = (
     #     "/home/rtalwar/robot-imitation-glue/datasets/delta_xyz_final_rgb"
     # )
     # eval_scenarios_dataset_path = train_dataset_path
 
     # eval_dataset_name = "eval_delta_xyz_final_rgb_audio_mit_frozen_intermediate_fixed_button"
-    eval_dataset_name = "./eval_curve/red_round_button_small_n75_button_30s"
+    eval_dataset_name = "./eval_curve_final/red_round_button_small_n100_scratch_30s"
 
     def preprocessor(obs_dict):
         spectogram_values_image = obs_dict["spectogram_values"]

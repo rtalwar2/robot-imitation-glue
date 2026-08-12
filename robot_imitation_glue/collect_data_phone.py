@@ -112,7 +112,6 @@ def collect_data(  # noqa: C901
                 print("stop recording")
                 # save episode
                 dataset_recorder.save_episode()
-                raise ValueError
                 # TODO: allow for textual description of the episode?
 
             elif event.delete_last and state.is_recording:
@@ -141,11 +140,13 @@ def collect_data(  # noqa: C901
 
             # update GUI.
             vis_img = observation["wrist_image"].copy()
-            scene_img = observation["scene_image"].copy()
 
             # visualize state is_recording, is_paused
             if state.is_recording:
-                cv2.putText(vis_img, "RECORDING", (10, 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 2)
+                if raw["move"]:
+                    cv2.putText(vis_img, "RECORDING", (10, 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 2)
+                else:
+                    cv2.putText(vis_img, "PAUSED", (10, 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 2)
             if state.is_paused:
                 cv2.putText(vis_img, "PAUSED", (10, 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 255), 2)
             cv2.putText(
@@ -159,20 +160,32 @@ def collect_data(  # noqa: C901
             )
             rr.log("wrist_image", rr.Image(vis_img, rr.ColorModel.RGB))
             rr.log("wrist_image original", rr.Image(observation["wrist_image_original"], rr.ColorModel.RGB))
-            rr.log("scene_image", rr.Image(scene_img, rr.ColorModel.RGB))
-            rr.log("scene_image original", rr.Image(observation["scene_image_original"], rr.ColorModel.RGB))
-            # rr.log("spectogram", rr.Image(observation["spectogram_image"], rr.ColorModel.RGB))
+            rr.log("spectogram", rr.Image(observation["spectogram_image"], rr.ColorModel.RGB))
             # rr.log("spectogrambgr", rr.Image(observation["spectogram_image"], rr.ColorModel.BGR))
             # print(f"wrist image shape: {observation['wrist_image'].shape}")
             # print(f"spectogram image shape: {observation['spectogram_image'].shape}")
             # rr.log("scene_image", rr.Image(observation["scene_image"], rr.ColorModel.RGB))
             rr.log("joints", rr.TextLog(str(observation["joints"])))
-            # rr.log("btn_state", rr.Scalars(float(observation["btn_state"])))
+            rr.log("btn_state", rr.Scalars(float(observation["btn_state"])))
             # if paused, do not collect teleop or execute action
-            
+            if state.is_paused:
+                time.sleep(0.1)
+                continue
 
-            joints = teleop_agent.get_action()
-            logger.info(f"Action: {joints}")
+            ee_pose = teleop_agent.get_action()
+            logger.info(f"Action: {ee_pose}")
+            raw = teleop_agent.teleop_device.last_raw_inputs
+            if raw["startRecording"]:
+                logger.info("Start recording event triggered by teleop device input.")
+                event.start_recording = True
+            elif raw["stopRecording"]:
+                logger.info("Stop recording event triggered by teleop device input.")
+                event.stop_recording = True
+            elif raw["cancelRecording"]:
+                logger.info("Cancel recording event triggered by teleop device input.")
+                event.delete_last = True
+            for key,value in raw.items():
+                logger.info(f"phone raw input {key}: {value}")
 
     #             2026-06-12 17:02:53.244 | INFO     | robot_imitation_glue.collect_data:collect_data:181 - phone raw input move: False
     # 2026-06-12 17:02:53.244 | INFO     | robot_imitation_glue.collect_data:collect_data:181 - phone raw input scale: 1.0
@@ -196,12 +209,14 @@ def collect_data(  # noqa: C901
             # print(policy_formatted_action)
             # print(policy_formatted_action.shape)
             # gripper_target = (1-action[-1])*0.085
-            env.act(robot_joints=joints[:-1],timestamp=time.time() + control_period)
-            env.move_gripper(width=joints[-1])
+            env.act_tcp(new_pose=ee_pose,timestamp=time.time() + control_period)
+
             if state.is_recording:
-                action = joints
+                action = abs_pose_to_policy_action(None, None, ee_pose, 0)
                 action = action.astype(np.float64)
-                dataset_recorder.record_step(observation, action)
+                if raw["move"]:
+                    # only recording when there is a movement input from the phone, to avoid recording many duplicate frames when the phone is stationary.
+                    dataset_recorder.record_step(observation, action)
 
             # wait for end of the control period
             if cycle_end_time > time.time():

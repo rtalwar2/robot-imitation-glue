@@ -210,11 +210,11 @@ class LeRobotDatasetRecorder(BaseDatasetRecorder):
     def start_episode(self):
         pass
 
-    def record_step(self, obs, action):
+    def record_step(self, obs, action, success=False):
         frame = {
             "action": torch.from_numpy(action),
             "next.reward": torch.tensor([0.0]),
-            "next.success": torch.tensor([False]),
+            "next.success": torch.tensor([bool(success)]),
             "seed": torch.tensor([0]),  # TODO: store the seed
             "task": "",
         }

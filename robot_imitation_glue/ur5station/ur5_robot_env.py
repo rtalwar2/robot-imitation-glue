@@ -43,12 +43,13 @@ from airo_teleop_devices.gello_teleop_device import GelloTeleopDevice
 
 from robot_imitation_glue.base import BaseEnv
 from robot_imitation_glue.hardware.ipc_camera import RGBCameraPublisher, RGBCameraSubscriber, initialize_ipc
+from airo_robots.grippers.hardware.schunk_process import SchunkGripperProcess
 
 WRIST_CAM_RGB_TOPIC = "wrist_rgb"
 WRIST_CAM_DEPTH_TOPIC = "wrist_depth"
 WRIST_CAM_RESOLUTION_TOPIC = "wrist_resolution"
 
-ROBOT_IP = "10.42.0.162"
+ROBOT_IP = "10.42.0.163"
 GELLO_AGENT_PORT = "/dev/serial/by-id/usb-FTDI_USB__-__Serial_Converter_FT792DZ5-if00-port0"
 CAMERA_UPDATE_HZ = 30
 logger = loguru.logger
@@ -59,30 +60,26 @@ class CameraFactory:
     def create_wrist_camera():
         from airo_camera_toolkit.cameras.realsense.realsense import Realsense
 
-        candidate_resolutions = [Realsense.RESOLUTION_720, Realsense.RESOLUTION_480]
-        last_error = None
-        for resolution in candidate_resolutions:
-            try:
-                logger.info(f"Trying RealSense profile: {resolution} @ 30fps")
-                return Realsense(resolution=resolution, fps=30)
-            except RuntimeError as error:
-                last_error = error
-                logger.warning(f"Failed to start RealSense with {resolution} @ 30fps: {error}")
-
-        raise RuntimeError(
-            "Could not start RealSense camera with supported profiles "
-            f"{candidate_resolutions}. Last error: {last_error}"
-        )
-
+        # 720p only, no fallback: touch_point_detector's radii are calibrated on 1280x720
+        # frames, so a silent drop to 480p would skew touch-point detection for a whole
+        # recording session. Fail loudly instead.
+        logger.info(f"Starting RealSense at {Realsense.RESOLUTION_720} @ 30fps")
+        return Realsense(resolution=Realsense.RESOLUTION_720, fps=30)
 
 class UR5eStation(BaseEnv):
 
-    def __init__(self,with_instrumentation=False,with_spectogram_model=True,use_internal_ft=False):
+    def __init__(self,schunk, with_instrumentation=False,with_spectogram_model=False,use_internal_ft=True,with_spectogram=False):
         self.with_instrumentation = with_instrumentation
         self.with_spectogram_model = with_spectogram_model
         self.use_internal_ft = use_internal_ft
+        # with_spectogram records the raw mel spectrogram as an observation (an input modality).
+        # with_spectogram_model additionally runs a trained AST over it; the two are independent.
+        self.with_spectogram = with_spectogram or with_spectogram_model
         logger.info("connecting to robot.")
         self.robot = URrtde(ROBOT_IP, URrtde.UR3E_CONFIG, gripper=None)
+
+        logger.info("connecting to gripper.")
+        self.gripper  = schunk
 
         initialize_ipc()
         logger.info("Creating wrist camera publisher.")
@@ -104,45 +101,45 @@ class UR5eStation(BaseEnv):
             logger.info("creating FT subscriber")
             self.ft_subscriber = FTSubscriber("FT")
 
+        if self.with_spectogram:
+            logger.info("creating spectogram subscriber")
+            self.spectogram_subscriber = SpectrogramSubscriberKaldi("KaldiSpectrogram")
 
-        logger.info("creating spectogram subscriber")
-        self.spectogram_subscriber = SpectrogramSubscriberKaldi("KaldiSpectrogram")
+        # if self.with_instrumentation:
+        #     logger.info("creating button subscriber")
+        #     self.button_subscriber = BTNSubscriber("BTN")
 
-        if self.with_instrumentation:
-            logger.info("creating button subscriber")
-            self.button_subscriber = BTNSubscriber("BTN")
+        # if self.with_spectogram_model:
+        #     # Path to your saved model (usually the checkpoint folder with best metrics)
+        #     # e.g., "./ast_delta_z/checkpoint-1900" or just "./ast_delta_z" if you saved the final model there
+        #     MODEL_PATH = "/home/rtalwar/robot-imitation-glue/outputs/ramen-noodels/ast_delta_xyz_button_click_detector" 
 
-        if self.with_spectogram_model:
-            # Path to your saved model (usually the checkpoint folder with best metrics)
-            # e.g., "./ast_delta_z/checkpoint-1900" or just "./ast_delta_z" if you saved the final model there
-            MODEL_PATH = "/home/rtalwar/robot-imitation-glue/outputs/ramen-noodels/ast_delta_xyz_button_click_detector" 
+        #     # MUST match the values printed during training
+        #     self.TRAIN_MEAN = 0.6460392475170917
+        #     self.TRAIN_STD  = 0.06145321258655634
 
-            # MUST match the values printed during training
-            self.TRAIN_MEAN = 0.6460392475170917
-            self.TRAIN_STD  = 0.06145321258655634
+        #     # Define labels (Update these to match your actual classes)
+        #     ID2LABEL = {
+        #         0: "Class_0",
+        #         1: "Class_1"
+        #     }
 
-            # Define labels (Update these to match your actual classes)
-            ID2LABEL = {
-                0: "Class_0",
-                1: "Class_1"
-            }
-
-            # Select device
-            self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-            print(f"Inference running on: {self.device}")
+        #     # Select device
+        #     self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        #     print(f"Inference running on: {self.device}")
 
 
-            # ---------------------------------------------------------
-            # 2. Load Model
-            # ---------------------------------------------------------
+        #     # ---------------------------------------------------------
+        #     # 2. Load Model
+        #     # ---------------------------------------------------------
 
-            # The config saved in MODEL_PATH already contains the customized 
-            # max_length (298) and architecture changes.
-            self.model = ASTForAudioClassification.from_pretrained(MODEL_PATH)
-            self.model.to(self.device)
-            self.model.eval() # Set to evaluation mode (freezes Dropout, Batchnorm, etc.)
+        #     # The config saved in MODEL_PATH already contains the customized 
+        #     # max_length (298) and architecture changes.
+        #     self.model = ASTForAudioClassification.from_pretrained(MODEL_PATH)
+        #     self.model.to(self.device)
+        #     self.model.eval() # Set to evaluation mode (freezes Dropout, Batchnorm, etc.)
 
-            print("Model loaded successfully.")
+        #     print("Model loaded successfully.")
 
         time.sleep(2)
 
@@ -182,16 +179,16 @@ class UR5eStation(BaseEnv):
     def get_robot_pose_se3(self):
         return self.robot.get_tcp_pose()
 
-    def move_robot_to_tcp_pose(self, pose):
-        self.robot.move_to_tcp_pose(pose).wait()
+    def move_robot_to_tcp_pose(self, pose,joint_speed):
+        self.robot.move_to_tcp_pose(pose, joint_speed=joint_speed).wait()
 
     def move_gripper(self, width):
-        del width
         # No parallel gripper in this setup.
+        self.gripper.move(width=width)
         return
 
     def get_gripper_opening(self):
-        return np.array([0.0], dtype=np.float32)
+        return np.array([self.gripper.get_current_width()], dtype=np.float32)
 
     def get_camera_intrinsics(self):
         self._wrist_camera_subscriber._grab_images()
@@ -217,16 +214,15 @@ class UR5eStation(BaseEnv):
     def get_observations(self):
 
         wrist_image = self._wrist_camera_subscriber.get_rgb_image_as_int()
-        spectogram_rgb_image,spectogram_values = self.spectogram_subscriber.get_spectogram()
-        # print(spectogram_image)
-        # scene_image = self._scene_camera_subscriber.get_rgb_image_as_int()
+        if self.with_spectogram:
+            spectogram_rgb_image, spectogram_values = self.spectogram_subscriber.get_spectogram()
         robot_state = self.get_robot_pose_euler().astype(np.float32)
         gripper_state = self.get_gripper_opening().astype(np.float32)
         joints = self.robot.get_joint_configuration().astype(np.float32)
         if self.use_internal_ft:
             ft = np.array(self.robot.rtde_receive.getActualTCPForce()).astype(np.float32)
-        else:
-            ft = self.ft_subscriber.get_FT()
+        # else:
+        #     ft = self.ft_subscriber.get_FT()
 
         # TODO: resize images (but still include the original?)
 
@@ -234,26 +230,21 @@ class UR5eStation(BaseEnv):
         # print(wrist_image.shape)
         # wrist_image_resized = cv2.resize(wrist_image, (224, 224))
         wrist_image_resized = cv2.resize(wrist_image, (320, 240))
-        # resize scene img, cut first 200 x pixels
-        # scene_image_resized = scene_image.copy()
-        # scene_image_resized = scene_image_resized[:, 200:]
-        # resize scene image to 224x224
-        # scene_image_resized = cv2.resize(scene_image_resized, (224, 224))
 
         state = np.concatenate((joints, gripper_state), axis=0)
         obs_dict = {
             "wrist_image_original": wrist_image,
-            # "scene_image_original": scene_image,
             "wrist_image": wrist_image_resized,
-            # "scene_image": scene_image_resized,
-            "spectogram_image": spectogram_rgb_image,
-            "spectogram_values": spectogram_values,
             "state": state,
             "robot_pose": robot_state,
             "gripper_state": gripper_state,
             "joints": joints,
             "ft": ft,
         }
+
+        if self.with_spectogram:
+            obs_dict["spectogram_image"] = spectogram_rgb_image
+            obs_dict["spectogram_values"] = spectogram_values
 
         if self.with_instrumentation:
             button = self.button_subscriber.get_button_state()

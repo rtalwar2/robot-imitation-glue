@@ -5,6 +5,7 @@ import sys
 
 from airo_teleop_agents.phone_teleop_agents import Phone4PositionManipulator
 from airo_teleop_phone.config_phone import PhoneConfig, PhoneOS
+from robot_imitation_glue import collect_data_phone
 from robot_imitation_glue.ur5station.data_collection import abs_se3_to_policy_action_converter
 from robot_imitation_glue.button_detector.ButtonDetector import ButtonDetector
 from robot_imitation_glue.eval_agent_delta_z import generate_deterministic_poses
@@ -37,11 +38,8 @@ from robot_imitation_glue.collect_data import collect_data, teleoperate
 from robot_imitation_glue.collect_data_delta import collect_data_xyz, collect_data_xyz_red_switch, collect_data_xyz_white_switch
 from robot_imitation_glue.dataset_recorder import LeRobotDatasetRecorder
 from robot_imitation_glue.ur5station.ur5_robot_env import UR5eStation
-from airo_robots.grippers.hardware.schunk_process import SchunkGripperProcess
-from airo_teleop_agents.gello_teleop_agents import Gello4UR_ParallelGripper
 
 
-from airo_teleop_devices.gello_teleop_device import GelloTeleopDevice, GelloConfig
 
 def delta_action_to_abs_se3_converter(robot_pose_se3, gripper_state, action):
     # convert spacemouse action to ur3e action
@@ -88,38 +86,42 @@ def abs_se3_to_relative_policy_action_converter(robot_pose, gripper_pose, abs_se
 
 
 if __name__ == "__main__":
-    schunk = SchunkGripperProcess(usb_interface="/dev/serial/by-path/pci-0000:00:14.0-usb-0:7:1.0-port0,11,115200,8E1")
 
-    env = UR5eStation(schunk,with_instrumentation=False,with_spectogram_model=False,use_internal_ft=True)
+    env = UR5eStation(with_instrumentation=True,with_spectogram_model=False,use_internal_ft=True)
 
-    dataset_name = "blok15" \
+    dataset_name = "testing_phone_datacollection2"
+
+    # create dummy env, agent and recorder to test flow.
+    PHONE_OS = PhoneOS.ANDROID  # or PhoneOS.IOS
+    ENABLE_TRANSLATIONS = True
+    ENABLE_ROTATIONS = True
+    phone_config = PhoneConfig(phone_os=PHONE_OS)
     
-    gello_config = GelloTeleopDevice.GELLO1_DEFAULT_CONFIG
-
-    teleop_agent = Gello4UR_ParallelGripper(
-                gello_usb_port="/dev/serial/by-id/usb-FTDI_USB__-__Serial_Converter_FT792DZ5-if00-port0",
-                gello_config=gello_config,
-                ur_robot=env.robot,
-                gripper=schunk,
-                use_joint_space=True)
+    teleop_agent = Phone4PositionManipulator(
+    position_manipulator=env.robot,
+    phone_config=phone_config,
+    translation_scale=0.5,
+    rotation_scale=1.0,
+    phone_forward_axis = "-x",
+    enable_settle_time_s= 0.25,
+    max_translation_step_m= 0.03,
+    max_rotation_step_rad= 0.35,
+    enabled_axes=[ENABLE_TRANSLATIONS] * 3 + [ENABLE_ROTATIONS] * 3,
+    auto_connect=True,
+    )
     # if not os.path.exists("datasets"):
     #     os.makedirs("datasets")
     dataset_recorder = LeRobotDatasetRecorder(
         example_obs_dict=env.get_observations(),
-        example_action=np.zeros((7), dtype=np.float64),
-        root_dataset_dir=Path(f"datasets/elias/{dataset_name}"),
+        example_action=np.zeros((10,), dtype=np.float64),
+        root_dataset_dir=Path(f"datasets/expert/{dataset_name}"),
         dataset_name=dataset_name,
         fps=10,
         use_videos=True,
     )
 
-    input("are you ready?")
-    joints = teleop_agent.get_action()
-    # env.robot.move_to_tcp_pose(joints, joint_sp/eed=0.1).wait()
-    env.robot.move_to_joint_configuration(joints[:-1], joint_speed=0.1).wait()
-
-
-    collect_data(
+    # input("are you ready?")
+    collect_data_phone(
         env,
         teleop_agent,
         dataset_recorder,

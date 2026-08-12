@@ -73,7 +73,7 @@ class LerobotAgent(BaseAgent):
 
     """
 
-    def __init__(self,policy, preprocessor, postprocessor, device, observation_preprocessor):
+    def __init__(self,policy, preprocessor, postprocessor, device, observation_preprocessor, n_env_action_dims=None):
         """
         processor must take the env obs dict and do
         1) numpy to tensor
@@ -81,7 +81,12 @@ class LerobotAgent(BaseAgent):
         3) renaming the keys to the policy expected keys
         4) (optional) do any other preprocessing, such as image resizing/cropping...
 
-
+        n_env_action_dims: keep only the first n dims of the policy's action. Needed for policies that
+            denoise auxiliary channels alongside the action (e.g. an instrumentation signal predicted
+            during training and discarded at inference): the environment only accepts the leading
+            action dims. Safe to pass for ordinary policies too -- it is a no-op when the policy's
+            action width already equals n_env_action_dims, which keeps the eval path identical across
+            policy variants.
         """
         super().__init__()
         self.policy = policy
@@ -89,6 +94,7 @@ class LerobotAgent(BaseAgent):
         self.postprocessor = postprocessor
         self.device = device
         self.observation_preprocessor = observation_preprocessor
+        self.n_env_action_dims = n_env_action_dims
 
     def get_action(self, observation):
         start_time = time.time()
@@ -101,6 +107,13 @@ class LerobotAgent(BaseAgent):
             observation = self.preprocessor(observation)
             action,used_images ,attn_maps= self.policy.select_action(observation)
             action = self.postprocessor(action)
+            if self.n_env_action_dims is not None:
+                if action.shape[-1] < self.n_env_action_dims:
+                    raise ValueError(
+                        f"policy produced {action.shape[-1]} action dims, fewer than the "
+                        f"{self.n_env_action_dims} the environment expects"
+                    )
+                action = action[..., : self.n_env_action_dims]
             time_end = time.time()
             logger.info(f"Lerobot agent inference took {((time_end - time_start)*1000):.2f} ms")
         return action.squeeze(0).cpu().numpy(),used_images,attn_maps

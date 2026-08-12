@@ -477,7 +477,7 @@ def eval_xyz_auto(  # noqa: C901
     time.sleep(5)
     # --- 2. GENERATE DETERMINISTIC POSES ---
     print("Generating 40 deterministic evaluation poses...")
-    eval_poses = generate_deterministic_poses(pre_touching_pose, env, count=20)
+    eval_poses = generate_deterministic_poses(pre_touching_pose, env, count=40)
     print(f"Generated {len(eval_poses)} poses.")
     def move_to_start_pose_with_negative_z_detour(target_pose):
         """
