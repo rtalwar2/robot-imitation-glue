@@ -3,7 +3,20 @@
 **Status:** supersedes `Task_Specifications.md` (8 July 2026)
 **Date:** 12 August 2026
 **Target:** RA-L
-**Structure:** Part 1 is the methodology shared by all tasks. Part 2 is a per-task checklist. Part 3 lists what still needs the promotor. Part 4 lists code issues found while writing this — items marked **FIXED** are already applied to the working tree; the rest are open.
+**Structure:** Part 1 is the methodology shared by all tasks. Part 2 is a per-task checklist. Part 3 lists what still needs the promotor. Part 4 lists code issues found along the way — items marked **FIXED** are applied and committed; the rest are open.
+
+**Implementation** (committed; the pilot's tooling exists, the data does not yet):
+
+| Script | Does |
+|---|---|
+| `ur5station/collect_data_bottle_opening.py` | collection entrypoint — wrist camera, audio, cap sensor, per-split pose seeds |
+| `ur5station/prepare_datasets_bottle.py` | the 8 prepared datasets: {9,12}-dim action × 4 data levels |
+| `ur5station/screen_instrumentation.py` | privilege gate + per-modality suitability (§1.4) |
+| `ur5station/train_ast_bottle.py` | design-A audio pretraining (forked from `train_ast_single.py`, which is unchanged) |
+| `ur5station/lerobot_train/bottle/generate_configs.py` | the 16 training configs, with a build-time arm-parity assertion |
+| `agents/lerobot_agent.py` | `n_env_action_dims` — slices design C's auxiliary channels off before the robot |
+
+Fork changes live in `lerobot` at `dd8ad224`: the AST position-embedding fix (§4.7) and the `rgb_encoder_init_checkpoint` / `audio_encoder_init_checkpoint` fields. Design C needs no fork change at all.
 
 ---
 
@@ -20,6 +33,9 @@
 | Petri dish | 4 stages incl. lid open/close | **Lid pre-removed** — navigate + roll only | Confirmed: lid is off before the episode |
 | Casting pieces, ziplock | Task 5 / deferred | **Both out of scope** | — |
 | Instrumentation normalization | Sensor hardware range | **Calibrated covered/uncovered range** (see §1.7) | Hardware range compresses the useful signal to a fraction of its span |
+| Design A starting point | Random init | **Generic (ImageNet/AudioSet), then instrumentation** | Holds generic pretraining constant between the generic and design-A arms, so their gap is attributable to the instrumentation stage |
+| Encoder input normalization | Not specified | **Per arm, matched to each encoder's initialization** (see §1.7) | A pretrained encoder is (weights, expected input distribution); splitting the two handicaps the control arm |
+| Step budget | Equalize total optimizer steps across arms | **Fixed 100K everywhere**, pretraining cost reported in text | The equalization is approximate anyway (encoder-only steps) and un-fixes the clean budget |
 
 ---
 
@@ -35,9 +51,9 @@ Does task-specific instrumentation — privileged sensor signals available durin
 
 ## 1.2 Two candidate mechanisms
 
-**Design A — encoder pretraining.** Pretrain a perception encoder to predict the instrumentation signal, then use those weights to initialize the policy encoder and fine-tune everything.
+**Design A — encoder pretraining.** Take a generic-pretrained perception encoder (ImageNet/AudioSet), finetune it to predict the instrumentation signal, then use those weights to initialize the policy encoder and finetune everything. Implemented by `rgb_encoder_init_checkpoint` / `audio_encoder_init_checkpoint`, loaded strictly after the encoders are built.
 
-**Design C — auxiliary prediction channels.** Append the instrumentation to the denoised output vector. Diffusion Policy predicts `[action (9), instrumentation (k)]` over the horizon; the instrumentation prediction is discarded at inference.
+**Design C — auxiliary prediction channels.** Append the instrumentation to the denoised output vector. Diffusion Policy predicts `[action (9), instrumentation (k)]` over the horizon; the instrumentation prediction is discarded at inference. Implemented entirely at the dataset level — a 12-dim `action` feature — because lerobot derives the denoised width from `config.action_feature.shape[0]`.
 
 Design C is expected to be stronger because it is action-conditioned (the model learns what its chosen action chunk will *do* to the sensor, not just what the sensor reads now), it shapes the whole network rather than the encoder alone, and it is single-stage — which removes the "the treatment saw the data twice" objection entirely.
 
@@ -128,8 +144,9 @@ Report absolute episode counts alongside percentages ("25%, N=8"), since N will 
 - **Diffusion Policy** via lerobot. Action format `[delta_xyz(3), rotation_6d(6)]`, 10 Hz.
 - **Fixed 100K steps for every variant.** The exact budget does not matter — what matters is that it is equal. A result that holds under an unoptimized-but-equal budget is a stronger result, not a weaker one.
 - **Take the final checkpoint.** Not "select by rollout success" — that would mean real-robot rollouts on multiple checkpoints per config, silently multiplying the rollout budget. Fixed budget, final checkpoint, no selection.
-- **Pretraining (design A only):** LR 1e-4, early stopping on validation loss (patience 500), BCE for binary, MSE for continuous. Frame it in the paper as *weight initialization*, not extra training: the encoder is ~5-20% of total policy parameters and pretraining is <5% of its total optimization.
-- **Equalize total optimizer steps** between design A and from-scratch (if pretraining runs 10K steps and fine-tuning 100K, from-scratch trains 110K). One config line, and it closes the "the treatment got more gradient steps" objection outright rather than arguing around it.
+- **Pretraining (design A only):** early stopping on validation loss, BCE for binary, MSE for continuous. LR is **per-modality**: 1e-4 for the resnet, 1e-5 for the AST (the paper convention for finetuning a pretrained transformer). Frame it in the paper as *weight initialization*, not extra training: the encoder is ~5-20% of total policy parameters and pretraining is <5% of its total optimization.
+- **Design A starts from generic weights**, not random: ImageNet/AudioSet, *then* finetuned on the instrumentation signal. So generic pretraining is held constant between the generic and design-A arms, and the latter's gap over the former is attributable to the instrumentation stage.
+- **No step equalization.** An earlier draft added design A's pretraining steps to the other arms to match total optimizer steps. Dropped: the equalization is approximate anyway (those are encoder-only steps, not full-policy steps) and adding them un-fixes the clean 100K budget. Report design A's pretraining cost in the text instead, under the weight-initialization framing above. If a reviewer presses, a step-equalized rerun of the from-scratch and design-A arms alone is cheap to add.
 
 **Normalization of the instrumentation signal.**
 
@@ -138,6 +155,23 @@ Report absolute episode counts alongside percentages ("25%, N=8"), since N will 
 *Design A:* normalize to the **calibrated covered/uncovered range** of each channel, not the raw hardware range. For the bottle sensor, covered sits at ~2.2-3.1 V and uncovered at ~3.2-3.3 V against a 0-3.3 V ADC span (`bottle_sensor.py:14-19`) — dividing by 3.3 V compresses the entire useful signal into the top third of the range. The calibrated range comes from the sensor logs, is fixed before training, and is identical across all reduction levels, so there is still zero leakage.
 
 **Auxiliary loss weighting (design C) is nearly free.** With `prediction_type=epsilon` every channel's regression target is the sampled noise ε ~ N(0, I), so all channels sit on the same loss scale regardless of what the underlying quantity is. With mean reduction over 12 channels, the 3 instrumentation dims take 3/12 = 25% of the objective automatically. No λ sweep, no gradient-norm matching. Just be deliberate that channel count sets the weight: three phototransistors give the instrumentation 25%, one gives it 10%.
+
+Accept and state one consequence: the *action* term is correspondingly scaled 9/12 = 0.75× relative to the action-only arms. That is inherent to the design rather than a bug, it is what the colleague's workshop result already did, and isolating it would need a non-standard loss patch.
+
+**Normalization of the encoder *inputs* is matched to each encoder's initialization.** Distinct from the instrumentation-target normalization above, and it is not a parity violation — a pretrained encoder is (weights, expected input distribution), and splitting the two handicaps it. Mis-normalizing the generic arm to keep configs superficially identical would weaken exactly the control that has to be strong for the "is the custom hardware worth building" argument.
+
+| Arm | image (`dataset.use_imagenet_stats`) | audio (`audio_norm_mean/std`) |
+|---|---|---|
+| from-scratch | dataset (`false`) | dataset-computed |
+| generic | **ImageNet (`true`)** | **AudioSet: −4.2677393 / 4.5689974** |
+| design A | dataset (`false`) | dataset-computed |
+| design C | dataset (`false`) | dataset-computed |
+
+Design A takes *dataset* stats despite starting from generic weights: the instrumentation stage is where its encoder last saw data, so it adapts to whatever normalization that stage used and the generic starting point is re-adapted away. Pretrain and deploy under the same stats. The random-init arms have no prior expectation, so dataset stats are simply the well-conditioned default.
+
+`audio_norm_mean`/`audio_norm_std` default to `0.0`/`1.0` — i.e. **no normalization at all** — so every arm must set them explicitly. The pretraining script records the values it used in the checkpoint so the arm config can be asserted against them.
+
+Framing for the paper: *only the encoder initialization and its matched input normalization differ.* Still controlled, because normalization is a deterministic consequence of the chosen init rather than a tuned knob. One caveat to state: the generic and design-A arms therefore differ in normalization as well as in the instrumentation stage, so their difference is not a pristine isolation of that stage. Cheap insurance in reserve: rerun the generic arm with dataset normalization at 100% data only.
 
 ## 1.8 Evaluation
 
@@ -195,7 +229,10 @@ This is a narrower axis than the stiffness-plus-appearance split previously plan
 
 ### Hardware and setup
 
-- [ ] **Remove the scene camera before recording a single episode.** Touch `CameraFactory.create_scene_camera`, the scene publisher/subscriber, and the `scene_image` / `scene_image_original` keys in `get_observations` (`ur5_robot_env.py:290-302`). Obs keys define the LeRobot feature schema (`dataset_recorder.py:163-188`), so removing the camera after episodes exist makes the dataset unresumable. This is a one-way door — do it first.
+- [x] ~~Remove the scene camera before recording a single episode.~~ **Done** — publisher, subscriber, factory method, topic constants and the `scene_image` / `scene_image_original` obs keys are gone; the ZED setup is recoverable from git if a later task needs an overhead camera. Wrist camera only.
+- [x] ~~Wire audio in before collection.~~ **Done** — `SpectrogramSubscriberKaldi` behind a new `with_spectogram` flag on `UR5eStation`, emitting `spectogram_image` and `spectogram_values`; `collect_data_bottle_opening.py` passes `with_spectogram=True`. Both this and the scene-camera removal change the recorded obs keys, which define the LeRobot feature schema (`dataset_recorder.py:163-188`), so neither is recoverable after episodes exist.
+
+**Modalities for the pilot:** wrist image, audio (AST), and `observation.state` = TCP pose (6) ⊕ internal FT (6). FT rides inside the state vector because `observation.state` is the only state key the policy consumes — any other `observation.*` vector is typed but never reaches `global_cond`.
 - [x] ~~Verify the wrist RealSense starts at 720p, not the 480p fallback.~~ **Done** — the fallback is removed; `create_wrist_camera` requests 720p and raises if that profile will not start (§4.6). Confirm the hardware actually supports it on the first run, since the D405 note in `ipc_camera.py:248` suggests it may not.
 - [ ] Fix the appearance set: how many sticker configurations, and which are train vs. OOD. No printing needed.
 - [ ] Verify both conditions in the generalization-axis warning above — sensor voltages unchanged by stickers, and stickers visible in the wrist frame.
@@ -212,13 +249,15 @@ This is a narrower axis than the stiffness-plus-appearance split previously plan
 
 - [ ] **Privilege test** (mandatory). Proprioception MLP → 3-channel sensor. Expect it to fail the gate (cap rotation depends on grip slip and thread engagement, not just wrist angle) — but confirm it, because a scripted motion makes proprioception unusually informative.
 - [ ] **Modality suitability** (mandatory here — design A needs it to pick which encoder to pretrain). Wrist image, audio (AST), FT. Record all scores and fix the threshold *before* looking at them.
-- [ ] Note that audio is currently **not wired in** — the spectrogram subscriber is commented out in `get_observations` (`ur5_robot_env.py:266`, `295-296`). Enable it before collection if audio is a candidate, since it cannot be recovered afterwards.
+- [ ] Both tests run from `ur5station/screen_instrumentation.py`, which builds the *policy's own* encoder classes from the arm's config, so the resulting weights load into the policy with `strict=True` and no key remapping. Audio pretraining for design A proper is `ur5station/train_ast_bottle.py`.
 
 ### Training and the mechanism comparison
 
-- [ ] No collection-code change is needed for design C. `bottle_sensor` is already recorded as a per-step state feature, so the 12-dim target `[action(9), sensor(3)]` can be assembled in the dataset transform.
-- [ ] Train all four variants × 4 data levels = 16 runs, 100K steps each, final checkpoint.
-- [ ] Equalize total optimizer steps for design A against from-scratch.
+- [x] ~~Confirm design C needs no collection-code change.~~ **Confirmed and implemented.** `ur5station/prepare_datasets_bottle.py` emits a 12-dim `action` = `[action(9), bottle_sensor(3)]`; lerobot reads the denoised width from `config.action_feature.shape[0]`, so the U-Net, sampling prior and MIN_MAX normalizer all widen with no policy change. Verified: both widths build, train and sample, +10,755 params (0.004%).
+- [x] ~~Add the inference slice.~~ **Done** — `LerobotAgent(n_env_action_dims=9)` truncates after the postprocessor. Pass `9` for **all four arms** (a no-op for three of them) so the eval path is byte-identical across arms.
+- [ ] Build the 8 prepared datasets (`prepare_datasets_bottle.py`) once collection and success-filtering are complete.
+- [ ] Generate the 16 configs (`lerobot_train/bottle/generate_configs.py`) — it asserts at build time that the arms differ only in intended keys. Requires the real `audio_norm_mean/std` from pretraining; it has no safe default.
+- [ ] Train 4 arms × 4 data levels = 16 runs, 100K steps each, final checkpoint.
 - [ ] 16 configs × 20 rollouts = **320 rollouts** for the pilot.
 - [ ] Decide the mechanism from Table 2, then carry the winner forward.
 
@@ -270,12 +309,12 @@ This is a narrower axis than the stiffness-plus-appearance split previously plan
 
 # Part 3 — Open items for the promotor
 
-1. **FT parity.** No generic pretrained weights exist for a force-torque MLP. Exclude FT from the variant comparison, or include it and state the asymmetry?
+1. ~~**FT parity.** No generic pretrained weights exist for a force-torque MLP.~~ **Largely resolved by implementation.** FT is concatenated into `observation.state` rather than given its own encoder, because `observation.state` is the only state key the policy consumes. So there is no FT encoder to initialize and no parity asymmetry in the variant comparison. What remains is a reporting point rather than a design question: FT is not separately *encoded*, so per-modality attribution for it comes from the offline screening runs, not from the policy. Still worth confirming the promotor is happy with that framing.
 2. ~~**Bottle cap mechanism.** Who designs the spring-based 3D print?~~ **Closed** — no variants are printed. One bottle, one cap; generalization comes from appearance changes instead. Note the cost: the axis no longer tests dynamics transfer, only appearance robustness.
 3. **Instrumented metal sheet.** Need the physical sheet and the wiring worked out. Blocks task 2 entirely.
 4. **Plugs per trial.** All six sizes cluttered in the box at once, or one per trial?
 5. **Wiping force tolerance.** Is there a real, narrow tolerance? If not, drop the task.
-6. **Relationship to the colleague's workshop paper.** If the mechanism is already published there, this paper's contribution is the data-efficiency curves, the generalization split, and the screening protocol. Confirm that framing and confirm authorship overlap.
+6. **Relationship to the colleague's workshop paper.** The mechanism (predicting the instrumentation alongside the action) is already published there, at 100% data on one task and one seed. This paper's contribution is therefore the **data-efficiency curves** and the **generalization split** — the privilege test is a supporting methodological note, not a claim. Confirm that framing and confirm authorship overlap.
 7. **Task count.** Bottle + plugs + petri dish is three. Pooled statistics gets meaningfully stronger with a fourth (n=30 → n=40 per cell). Is wiping worth rescuing for that reason alone, or is three enough?
 
 ---
@@ -315,3 +354,17 @@ Severity is low because the lift-off segment after the loop *does* receive the c
 `create_wrist_camera` tried 720p and silently stepped down to 480p if it failed (`ur5_robot_env.py:64`). `touch_point_detector`'s radii are calibrated on 1280×720, so a fallback would have skewed touch-point detection for an entire recording session with only a warning. It now requests 720p and raises. The runtime shape check at `collect_data_bottle.py:250` is kept as a downstream-resize guard, with its message updated.
 
 Note `ipc_camera.py:250` has a *separate* `CameraFactory.create_camera` pinned to 480p, with a comment that the D405 does not support 1080p. It is referenced only from that file's `__main__`, so the bottle rig is unaffected — but it hints that 720p may not be available on this camera, in which case the new code will raise rather than degrade. Test once before a collection session.
+
+### 4.7 AST position embeddings were silently randomized — **FIXED**
+
+`DiffusionAudioEncoder` sets `hf_config.max_length = time_dimension` (298) while the AudioSet checkpoint is trained at 1024 frames. That changes the patch count, so `position_embeddings` mismatches — `(1, 1214, 768)` vs `(1, 350, 768)` — and `ignore_mismatched_sizes=True` does **not** rescale them as the old comment claimed. It re-initialized 268,800 parameters at random and then fed AudioSet-pretrained transformer blocks position encodings they had never seen. The generic arm, which has to be strong for the "is the hardware worth building" argument, was silently crippled.
+
+Now the checkpoint is loaded at its native length and the embeddings are resized before transfer: a centre slice when shrinking, interpolation only when growing. The slice is deliberate — the embeddings encode absolute position at a fixed 10 ms patch stride, and our clips use that same stride, so a contiguous slice preserves the time scale where interpolation would compress 10 s of structure into 3 s. Matches the reference AST implementation. Verified against the real checkpoint: **198/199 tensors transfer byte-identically, `position_embeddings` is the only resized tensor, and nothing is left at random init.** `_load_pretrained_ast` now raises on any unmatched key instead of degrading quietly.
+
+The same bug was in `train_ast_single.py:90` (with the same incorrect comment), so the button experiment's AST also pretrained from AudioSet blocks plus random position embeddings. It trained for 10 epochs afterwards, so the *output* checkpoint has learned embeddings — but it started from a worse initialization than intended. `train_ast_bottle.py` inherits the fix by building the policy's encoder class.
+
+### 4.8 The spectrogram is video-compressed before the AST sees it — open
+
+`spectogram_values` is a 3-D array, so `dataset_recorder.py:171-177` classifies it as a **video** feature. The mel spectrogram the AST consumes is therefore H.264-encoded and float-quantized to uint8 — lossy compression applied to one of the modalities under evaluation.
+
+Pre-existing (the button experiment's results went through it too), so it was left alone rather than changed unilaterally, but it deserves a deliberate decision before the audio arms are taken seriously. The lossless option is storing the spectrogram flattened as a 1-D float32 vector, which makes it a state feature; that would need a small change to the fork's audio branch to reshape on the way in.
