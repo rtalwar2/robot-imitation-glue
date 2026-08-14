@@ -15,6 +15,7 @@ import sys
 import time
 from pathlib import Path
 
+import cv2
 import loguru
 import numpy as np
 import rerun as rr
@@ -65,6 +66,43 @@ DEPTH_NUDGE_M = 0.003  # metres to press deeper per retry attempt, along -cap_no
 MAX_MOTION_RETRIES = 3  # how many times to retract and redo the whole push+legs motion
 
 
+def log_observation_to_rerun(obs, recording, n_episodes, label=""):
+    """Live wrist feed, spectrogram and cap-sensor traces in rerun, with a recording banner.
+
+    Takes an already-fetched observation rather than reading the env itself: the DDS subscribers
+    behind `bottle_sensor` and the spectrogram use `reader.take()`, which *consumes* samples, so a
+    second reader (a background viz thread, or a viz call that re-fetches) would steal readings
+    from the recording loop and silently corrupt what lands in the dataset.
+    """
+    vis_img = np.ascontiguousarray(obs["wrist_image"].copy())
+    if recording:
+        cv2.putText(vis_img, "RECORDING", (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 0), 2)
+    else:
+        cv2.putText(vis_img, "NOT RECORDING", (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (180, 180, 180), 2)
+    cv2.putText(vis_img, f"episodes: {n_episodes}", (10, 48), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+    if label:
+        cv2.putText(vis_img, label, (10, 68), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
+
+    rr.log("wrist_image", rr.Image(vis_img, rr.ColorModel.RGB))
+    rr.log("status", rr.TextLog(f"{'RECORDING' if recording else 'not recording'} | {label}"))
+    if "spectogram_image" in obs:
+        rr.log("spectogram", rr.Image(obs["spectogram_image"], rr.ColorModel.RGB))
+    for channel_index, voltage in enumerate(obs["bottle_sensor"]):
+        rr.log(f"bottle_sensor/S{channel_index}", rr.Scalars(float(voltage)))
+    rr.log("ft", rr.TextLog(str(np.round(np.asarray(obs["ft"]) - np.asarray(obs["ft_bias"]), 2))))
+
+
+def log_idle_to_rerun(env, dataset_recorder, label):
+    """Refresh the rerun view while NOT recording (moving to home, verifying, waiting on input).
+
+    Safe to fetch here because the recording loop is not running concurrently. Blocking `input()`
+    prompts freeze the view on the last frame, which is honest -- nothing is being recorded then.
+    """
+    log_observation_to_rerun(
+        env.get_observations(), recording=False, n_episodes=dataset_recorder.n_recorded_episodes, label=label
+    )
+
+
 def _tool_frame_step(current_pose, target_pose, max_translation_step, max_rotation_step_rad):
     """Clipped delta from current_pose to target_pose in the TOOL frame: [delta_xyz(3),
     delta_rotvec(3)], the format step_action_to_policy_action_6d expects."""
@@ -101,6 +139,7 @@ def servo_to_waypoint(
     pos_tol=0.001,
     rot_tol_rad=0.02,
     max_steps=2000,
+    label="",
 ):
     """Fixed-rate replacement for `move_linear_to_tcp_pose(target_pose).wait()`: servoes the
     left arm to target_pose, recording one (obs, policy_action) frame per control cycle.
@@ -124,8 +163,9 @@ def servo_to_waypoint(
         next_pose = policy_action_to_tcp_pose(current_pose, policy_action)
         dataset_recorder.record_step(obs, policy_action)
         env.act_tcp(next_pose, time.time() + control_period)
-        for channel_index, voltage in enumerate(obs["bottle_sensor"]):
-            rr.log(f"bottle_sensor/S{channel_index}", rr.Scalars(float(voltage)))
+        log_observation_to_rerun(
+            obs, recording=True, n_episodes=dataset_recorder.n_recorded_episodes, label=label
+        )
         precise_wait(cycle_end_time)
         current_pose = env.get_robot_pose_se3()
     else:
@@ -230,7 +270,10 @@ def run_opening_motion_with_retry(env, dataset_recorder, plan, cap_normal, hover
             target_pose = base_pose.copy()
             target_pose[:3, 3] = target_pose[:3, 3] + depth_offset
             print(f"[move] {label} -> {np.round(target_pose[:3, 3], 4)}")
-            reached_pose = servo_to_waypoint(env, dataset_recorder, target_pose, control_period)
+            reached_pose = servo_to_waypoint(
+                env, dataset_recorder, target_pose, control_period,
+                label=f"attempt {attempt}: {label}",
+            )
 
             if checkpoint_name is None:
                 continue
@@ -249,7 +292,9 @@ def run_opening_motion_with_retry(env, dataset_recorder, plan, cap_normal, hover
             return reached_pose, False
 
         print("[verify] retracting to the hover pose to check recovery state")
-        servo_to_waypoint(env, dataset_recorder, hover_pose.copy(), control_period)
+        servo_to_waypoint(
+            env, dataset_recorder, hover_pose.copy(), control_period, label="retracting to hover"
+        )
 
         previous_segment_index = _previous_checkpoint_segment_index(segments, checkpoint_failed_index)
         if previous_segment_index is None:
@@ -297,6 +342,7 @@ def collect_data_bottle_opening(env, dataset_recorder, frequency=10, bottle_pose
             # moves the bottle, so nothing is in contact. The raw reading is still what gets
             # recorded; this only publishes the offset alongside it.
             env.capture_ft_bias()
+            log_idle_to_rerun(env, dataset_recorder, "at home -- FT bias captured")
 
             pose_index = dataset_recorder.n_recorded_episodes % len(bottle_poses)
             rr.set_time("pose", sequence=dataset_recorder.n_recorded_episodes)
@@ -317,6 +363,7 @@ def collect_data_bottle_opening(env, dataset_recorder, frequency=10, bottle_pose
             current_pose = env.get_robot_pose_se3()
             camera_pose_in_base = current_pose @ tcp_left_to_camera
             hover_height = float(cap_normal.dot(current_pose[:3, 3] - cap_center))
+            log_idle_to_rerun(env, dataset_recorder, "at hover -- verify the touch point")
 
             def grab_and_detect():
                 """A fresh wrist frame with the touch-point detector run on it.
@@ -367,6 +414,7 @@ def collect_data_bottle_opening(env, dataset_recorder, frequency=10, bottle_pose
             servo_to_waypoint(
                 env, dataset_recorder, lift_pose, control_period,
                 max_translation_step=RETREAT_SPEED * control_period,
+                label="lifting off the cap",
             )
 
             print("[move] retreating ur_left home")
@@ -381,6 +429,7 @@ def collect_data_bottle_opening(env, dataset_recorder, frequency=10, bottle_pose
                 print(f"[episode] saved (episode {dataset_recorder.n_recorded_episodes - 1})")
                 if event.quit:
                     break
+                log_idle_to_rerun(env, dataset_recorder, "episode saved -- close the bottle by hand")
                 input("Close the bottle by hand, then press Enter to continue to the next pose...")
             else:
                 dataset_recorder.delete_episode()
