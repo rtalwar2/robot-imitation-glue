@@ -64,6 +64,7 @@ logger = loguru.logger
 
 DEPTH_NUDGE_M = 0.003  # metres to press deeper per retry attempt, along -cap_normal
 MAX_MOTION_RETRIES = 3  # how many times to retract and redo the whole push+legs motion
+RETRACT_LIFT_METERS = 0.05  # metres to lift off the cap along its normal before retrying
 
 
 def log_observation_to_rerun(obs, recording, n_episodes, label=""):
@@ -226,7 +227,7 @@ def _previous_checkpoint_segment_index(segments, segment_index):
     return checkpoint_segment_indices[position - 1] if position > 0 else None
 
 
-def run_opening_motion_with_retry(env, dataset_recorder, plan, cap_normal, hover_pose, control_period):
+def run_opening_motion_with_retry(env, dataset_recorder, plan, cap_normal, control_period):
     """Execute the descend + push + LEGS motion, gated by sensor-verified checkpoints
     (push_end, leg_3_end, leg_6_end -- see SENSOR_CHECKPOINTS), pressing DEPTH_NUDGE_M
     deeper into the cap on every retry (an identical replay would very likely just fail
@@ -291,9 +292,16 @@ def run_opening_motion_with_retry(env, dataset_recorder, plan, cap_normal, hover
             logger.warning(f"[verify] giving up after {MAX_MOTION_RETRIES} retries -- continuing anyway")
             return reached_pose, False
 
-        print("[verify] retracting to the hover pose to check recovery state")
+        # Lift just far enough to disengage the gripper from the cap, so the sensor reads the cap's
+        # own state rather than whatever the gripper is holding it in. Going all the way back to the
+        # hover pose would work too but wastes most of the travel: the re-check only needs the cap
+        # released, and every centimetre of it is recorded as demonstration steps.
+        print(f"[verify] lifting {RETRACT_LIFT_METERS * 100:.0f}cm off the cap to check recovery state")
+        lift_pose = env.get_robot_pose_se3().copy()
+        lift_pose[:3, 3] = lift_pose[:3, 3] + RETRACT_LIFT_METERS * cap_normal
         servo_to_waypoint(
-            env, dataset_recorder, hover_pose.copy(), control_period, label="retracting to hover"
+            env, dataset_recorder, lift_pose, control_period,
+            label=f"lifting {RETRACT_LIFT_METERS * 100:.0f}cm to retry",
         )
 
         previous_segment_index = _previous_checkpoint_segment_index(segments, checkpoint_failed_index)
@@ -317,9 +325,21 @@ def run_opening_motion_with_retry(env, dataset_recorder, plan, cap_normal, hover
     return reached_pose, False
 
 
-def collect_data_bottle_opening(env, dataset_recorder, frequency=10, bottle_poses=None):
+def collect_data_bottle_opening(env, dataset_recorder, frequency=10, bottle_poses=None, n_episodes=None):
+    """Collect `n_episodes` successful demonstrations, one per generated bottle pose by default.
+
+    Defaults to len(bottle_poses), so each pose is used exactly once when nothing fails. Failed
+    episodes are discarded without advancing the counter, so a pose that fails is retried rather
+    than skipped -- which also means a pose that can never succeed will loop indefinitely; watch
+    the printed progress.
+
+    Counting successful episodes in the dataset (rather than loop iterations) makes this resumable:
+    the recorder picks up n_recorded_episodes from an existing dataset, so a re-run tops up to the
+    target instead of starting over.
+    """
     if not bottle_poses:
         raise ValueError("bottle_poses is empty -- generate reachable poses first")
+    target_episodes = len(bottle_poses) if n_episodes is None else n_episodes
 
     rr.init("robot_imitation_glue_bottle")
     rr.spawn(memory_limit="10GB")
@@ -330,8 +350,16 @@ def collect_data_bottle_opening(env, dataset_recorder, frequency=10, bottle_pose
 
     intrinsics = env.get_camera_intrinsics()
 
+    if dataset_recorder.n_recorded_episodes >= target_episodes:
+        print(
+            f"[collect] dataset already holds {dataset_recorder.n_recorded_episodes}/{target_episodes} "
+            "episodes -- nothing to do"
+        )
+        return
+
     try:
-        while not event.quit:
+        while not event.quit and dataset_recorder.n_recorded_episodes < target_episodes:
+            print(f"\n===== {dataset_recorder.n_recorded_episodes}/{target_episodes} episodes collected =====")
             input("Press Enter to move the LEFT arm to the retracted home pose (Ctrl+C to abort)...")
             print("[move] retreating ur_left home")
             env.robot.move_to_joint_configuration(LEFT_HOME_JOINTS, joint_speed=LEFT_TRANSIT_JOINT_SPEED).wait()
@@ -404,7 +432,7 @@ def collect_data_bottle_opening(env, dataset_recorder, frequency=10, bottle_pose
             dataset_recorder.start_episode()
 
             _final_pose, episode_success = run_opening_motion_with_retry(
-                env, dataset_recorder, plan, cap_normal, hover_pose, control_period
+                env, dataset_recorder, plan, cap_normal, control_period
             )
 
             # retreat: lift off the cap along its normal (recorded), then transit back home (not recorded -- a reset, not demonstration behaviour)
@@ -427,8 +455,8 @@ def collect_data_bottle_opening(env, dataset_recorder, frequency=10, bottle_pose
             if episode_success:
                 dataset_recorder.save_episode()
                 print(f"[episode] saved (episode {dataset_recorder.n_recorded_episodes - 1})")
-                if event.quit:
-                    break
+                if event.quit or dataset_recorder.n_recorded_episodes >= target_episodes:
+                    break  # done -- no point asking the operator to reset for an episode that won't run
                 log_idle_to_rerun(env, dataset_recorder, "episode saved -- close the bottle by hand")
                 input("Close the bottle by hand, then press Enter to continue to the next pose...")
             else:
@@ -445,3 +473,8 @@ def collect_data_bottle_opening(env, dataset_recorder, frequency=10, bottle_pose
     finally:
         listener.stop()
         dataset_recorder.finish_recording()
+        collected = dataset_recorder.n_recorded_episodes
+        if collected >= target_episodes:
+            print(f"[collect] done: {collected}/{target_episodes} episodes collected")
+        else:
+            print(f"[collect] stopped early with {collected}/{target_episodes} episodes -- re-run to top up")
