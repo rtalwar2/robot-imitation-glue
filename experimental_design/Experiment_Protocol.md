@@ -141,12 +141,30 @@ Report absolute episode counts alongside percentages ("25%, N=8"), since N will 
 
 ## 1.7 Training
 
-- **Diffusion Policy** via lerobot. Action format `[delta_xyz(3), rotation_6d(6)]`, 10 Hz.
+- **Diffusion Policy** via lerobot, 10 Hz. Action representation: see below.
 - **Fixed 100K steps for every variant.** The exact budget does not matter — what matters is that it is equal. A result that holds under an unoptimized-but-equal budget is a stronger result, not a weaker one.
 - **Take the final checkpoint.** Not "select by rollout success" — that would mean real-robot rollouts on multiple checkpoints per config, silently multiplying the rollout budget. Fixed budget, final checkpoint, no selection.
 - **Pretraining (design A only):** early stopping on validation loss, BCE for binary, MSE for continuous. LR is **per-modality**: 1e-4 for the resnet, 1e-5 for the AST (the paper convention for finetuning a pretrained transformer). Frame it in the paper as *weight initialization*, not extra training: the encoder is ~5-20% of total policy parameters and pretraining is <5% of its total optimization.
 - **Design A starts from generic weights**, not random: ImageNet/AudioSet, *then* finetuned on the instrumentation signal. So generic pretraining is held constant between the generic and design-A arms, and the latter's gap over the former is attributable to the instrumentation stage.
 - **No step equalization.** An earlier draft added design A's pretraining steps to the other arms to match total optimizer steps. Dropped: the equalization is approximate anyway (those are encoder-only steps, not full-policy steps) and adding them un-fixes the clean 100K budget. Report design A's pretraining cost in the text instead, under the weight-initialization framing above. If a reviewer presses, a step-equalized rerun of the from-scratch and design-A arms alone is cheap to add.
+
+**Action representation: tool-frame deltas, kept.**
+
+The policy predicts `[delta_xyz_tool(3), rot6d(R_delta)(6)]` — a translation offset in the **tool** frame and a relative rotation `R_delta = R_current^T · R_target`, applied at execution to the robot's live pose. Considered and rejected: absolute joint space (lerobot's default) and lerobot's `RelativeActionsProcessorStep` / `AbsoluteActionsProcessorStep`.
+
+*The defense.* Tool-frame actions combined with a **wrist-mounted** camera make the policy equivariant to where the non-dominant arm presents the bottle: move the whole scene rigidly and both the correct action and the observed image are unchanged. The non-dominant arm presents the bottle at ~100 different poses, and the policy sees each as the same problem rather than a hundred separate ones. On a data-efficiency paper that equivariance is doing real work, which is also why **absolute joint space is the worse option here** — it would turn each presentation pose into a distinct configuration with no sharing between them.
+
+*Why not lerobot's relative-action processors.* Four reasons, in order of weight:
+1. It is orthogonal to the paper's claim. Action representation is a nuisance factor held identical across all four arms, so it moves absolute success rates but cannot affect the instrumentation comparison.
+2. It would rewrite the eval path — the policy would emit absolute poses instead of deltas — which is the riskiest code to change immediately before collection.
+3. Relative-to-chunk-start **cannot be precomputed per frame** (frame *t*'s action appears in up to `horizon` chunks with different reference poses), so it has to be a processor step, and `make_diffusion_pre_post_processors` has none — the machinery is wired for the pi family only.
+4. `to_relative_actions` is elementwise subtraction, which cannot compose rotations: the rot6d dims would get a linear difference rather than a geometric delta. Invertible and therefore lossless, but not what the representation is supposed to mean.
+
+*Proprioception stays in `observation.state`.* It entered this protocol as the §1.4 screening gate, not as a policy input — the policy input is a separate decision, and it is to keep it: with `n_obs_steps = 2`, pose[t-1] and pose[t] give velocity, which is not cleanly recoverable from two wrist frames and matters for a contact task; the petri-dish task feeds the policy base-frame target coordinates, so stripping pose here would make the pilot structurally different from the tasks it is pooled with; and it is identical across all four arms, so it cannot affect the comparison either way.
+
+*Limitation to state in the paper.* This is UMI's "delta" category, and its objection applies within a chunk: action *k* is an offset from pose[t+k], which the policy never observes, so later actions assume the earlier ones executed as predicted. Two things blunt it — each action is applied to the robot's **live** pose rather than to an integrated prediction, and at `n_action_steps = 8` / 10 Hz the accumulation window is 0.8 s. The principled fix, if a reviewer presses, is to express all `horizon` actions as tool-frame offsets from the *chunk-start* pose: UMI-correct and equivariance-preserving, but it needs a custom processor step, since neither a dataset transform nor lerobot's elementwise version can do it.
+
+*Revisitable.* Absolute target poses are recoverable from what is recorded — `policy_action_to_tcp_pose(robot_pose, action)` — so a relative-action arm can be run later on the same episodes as a clean A/B, without recollecting.
 
 **Normalization of the instrumentation signal.**
 
