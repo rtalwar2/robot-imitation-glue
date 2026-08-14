@@ -134,13 +134,26 @@ def compute_yawed_gripper_orientation(cap_normal, reference_direction, yaw_deg):
     return orthonormalize_rotation(np.column_stack([x_axis, y_axis, z_axis]))
 
 
-def verify_or_correct_touch_point(image_bgr, detected_pixel):
+def verify_or_correct_touch_point(image_bgr, detected_pixel, regrab=None):
     """Show the frame in an OpenCV window so the detection can be verified or corrected.
 
     Click to set a corrected touch point (green cross; click again to move it), press
     Enter/y/space to accept the current point, r to undo the correction, q/Esc to abort.
     When the detection failed (detected_pixel is None), a click is required before
-    accepting. Returns (final_pixel, corrected_click_or_None, overlay_image).
+    accepting.
+
+    `regrab`, if given, is a zero-argument callable returning a fresh
+    (image_bgr, detected_pixel) pair -- typically a new camera frame with the detector re-run
+    on it. Pressing t then replaces the frame being annotated, which is the fix for a blurred,
+    badly exposed or occluded grab: without it the only options are to accept a bad frame or
+    abort the episode. Any correction clicked so far is discarded, since its coordinates refer
+    to the old frame.
+
+    Returns (final_pixel, corrected_click_or_None, overlay_image, image_bgr, detected_pixel).
+    The last two are returned rather than reused from the caller's arguments because `regrab`
+    may have replaced both: the caller must save and project the frame that was actually
+    annotated, and record the detection that belongs to it -- pairing a fresh image with the
+    previous frame's detection would quietly corrupt the touch-point dataset.
     """
     window_name = "Verify touch point (click to correct)"
     cv2.namedWindow(window_name, cv2.WINDOW_AUTOSIZE)
@@ -149,7 +162,8 @@ def verify_or_correct_touch_point(image_bgr, detected_pixel):
 
     if detected_pixel is None:
         print("[verify] detection FAILED -- click the touch point manually, then press Enter")
-    print("[verify] keys: click=correct, Enter/y/space=accept, r=undo correction, q/Esc=abort")
+    retake_key = ", t=retake image" if regrab is not None else ""
+    print(f"[verify] keys: click=correct, Enter/y/space=accept, r=undo correction{retake_key}, q/Esc=abort")
 
     while True:
         overlay = draw_overlay(image_bgr, click_state.point, detected_pixel)
@@ -161,9 +175,15 @@ def verify_or_correct_touch_point(image_bgr, detected_pixel):
                 print("[verify] no touch point set yet -- click one first")
                 continue
             cv2.destroyWindow(window_name)
-            return final_pixel, click_state.point, overlay
+            return final_pixel, click_state.point, overlay, image_bgr, detected_pixel
         elif key == ord("r"):
             click_state.point = None
+        elif key == ord("t") and regrab is not None:
+            image_bgr, detected_pixel = regrab()
+            # The old click was in the old frame's pixel coordinates, so it no longer means
+            # anything -- drop it rather than silently carrying it onto a different image.
+            click_state.point = None
+            print(f"[verify] retook the image -- detection is now {detected_pixel}")
         elif key in (27, ord("q")):
             cv2.destroyAllWindows()
             raise SystemExit("Aborted at touch-point verification -- not moving.")
@@ -223,7 +243,10 @@ if __name__ == "__main__":
 
     # verify/correct interactively, and grow the labeled dataset with this frame:
     # click_xy is the human-verified ground truth (the accepted detection, or the correction)
-    touch_pixel, corrected_pixel, verify_overlay = verify_or_correct_touch_point(image_bgr, detected_pixel)
+    # no regrab callback here: this script grabs a single frame up front, so 't' is inert
+    touch_pixel, corrected_pixel, verify_overlay, image_bgr, detected_pixel = verify_or_correct_touch_point(
+        image_bgr, detected_pixel
+    )
     save_touch_point_sample(image_bgr, verify_overlay, hover_height, touch_pixel, detected_pixel)
     if corrected_pixel is not None:
         print(f"[verify] using corrected touch point {touch_pixel} (detection was {detected_pixel})")

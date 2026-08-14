@@ -49,7 +49,7 @@ BASE_LEFT_TO_BASE_RIGHT = np.eye(4)
 BASE_LEFT_TO_BASE_RIGHT[0, 3] = 0.91
 
 MARKER_SIZE = 0.031  # metres, side length of the printed marker on the bottle cap
-HOVER_HEIGHT_METERS = 0.05  # how far above the bottle cap to hover before descending
+HOVER_HEIGHT_METERS = 0.1  # how far above the bottle cap to hover before descending
 
 # 10x slower than URrtde's default (0.1 m/s)
 HOVER_LINEAR_SPEED = 0.01  # m/s

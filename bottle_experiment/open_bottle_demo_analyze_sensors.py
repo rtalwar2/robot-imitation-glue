@@ -87,6 +87,7 @@ class SensorLogger:
         self._start_time = None
         self._connected = threading.Event()
         self._failed = threading.Event()
+        self._stop_requested = threading.Event()
         self._thread = threading.Thread(target=lambda: asyncio.run(self._run()), daemon=True)
 
     def start(self, timeout=15.0):
@@ -95,9 +96,22 @@ class SensorLogger:
             raise RuntimeError(f"Could not connect to sensor device '{self.device_name}' within {timeout}s")
         print(f"[sensors] connected to '{self.device_name}', logging started")
 
+    def stop(self, timeout=5.0):
+        """Signal the background BLE thread to unsubscribe and disconnect gracefully (like
+        instrumentation_ble_plot3.py's Ctrl+C handling), then wait for it to finish."""
+        self._stop_requested.set()
+        self._thread.join(timeout=timeout)
+        if self._thread.is_alive():
+            print("[sensors] WARNING: BLE thread did not shut down within timeout")
+
     async def _run(self):
         try:
-            device = await BleakScanner.find_device_by_name(self.device_name, timeout=10.0)
+            # find_device_by_name() only exists in newer bleak (>=0.19); find_device_by_filter()
+            # is present across versions -- see SensorCommDDS/.../bottle_ble_reader.py.
+            def _matches_device_name(scanned_device, advertisement_data):
+                return scanned_device.name == self.device_name
+
+            device = await BleakScanner.find_device_by_filter(_matches_device_name, timeout=10.0)
             if device is None:
                 print(f"[sensors] device '{self.device_name}' not found")
                 self._failed.set()
@@ -114,8 +128,11 @@ class SensorLogger:
 
                 await client.start_notify(self.characteristic_uuid, handler)
                 self._connected.set()
-                while True:
+                while not self._stop_requested.is_set():
                     await asyncio.sleep(0.1)
+                print("[sensors] disconnecting BLE gracefully...")
+                await client.stop_notify(self.characteristic_uuid)
+                # client.disconnect() runs automatically as this `async with` block exits
         except Exception as exc:  # keep the main script alive even if BLE drops/fails
             print(f"[sensors] BLE error: {exc}")
             self._failed.set()
@@ -177,73 +194,197 @@ LEGS = [
 # bottle-center axis: at 0 the gripper's x-axis points from the touch point toward the
 # center; positive rotates counter-clockwise about the cap's outward normal.
 GRIPPER_YAW_DEG = 90
-MOVE_SPEED = 0.01  # m/s, same slow speed as the annotation tool
+MOVE_SPEED = 0.05  # m/s, same slow speed as the annotation tool
 
 # --- sensor-verified retry -------------------------------------------------------------
-# Each channel's own covered/uncovered voltage separation, derived from the largest gap in
-# 3 recorded runs (sensor_logs/run_0000-0002.json): S0 in [2.25-2.86] covered / [3.24] open,
-# S1 in [2.69-3.12] covered / [3.24-3.28] open, S2 in [2.24-2.78] covered / [3.22-3.23] open.
-# Re-derive (see the analysis in this file's git history / chat) if the sensor mounting,
-# cap, or LEGS geometry changes -- these numbers are specific to this physical setup.
-PER_CHANNEL_THRESHOLDS = [3.05, 3.18, 3.00]  # S0, S1, S2, in volts
+# Each channel's own covered/uncovered voltage separation, derived from runs 0003/0005/0006
+# (the 3 runs under the current motion parameters -- 0000-0002 used a different sensor
+# layout and aren't comparable). S0's covered baseline has drifted up to ~3.11 across these
+# runs, leaving only ~0.13V margin to the lowest observed uncovered reading (3.24) -- re-check
+# if it drifts further. Kept in sync with robot_imitation_glue/hardware/bottle_sensor.py --
+# re-derive both together if the sensor mounting, cap, or LEGS geometry changes.
+PER_CHANNEL_THRESHOLDS = [3.17, 3.18, 3.00]  # S0, S1, S2, in volts
 
-# Which sensor channels (indices into PER_CHANNEL_THRESHOLDS) must be uncovered by the end
-# of each named event, per the same 3 runs. Only leg_3_end and leg_5_end are real
-# milestones: S0 and S1 both pop open by leg_3_end, S2 (the last tab) by leg_5_end.
-# push_end/leg_2/leg_4/leg_6 show no reliable NEW transition at these thresholds and are
-# deliberately not gated (leg_6 in particular showed zero sensor change in any run).
+# Which sensor channel (index into PER_CHANNEL_THRESHOLDS) must be uncovered by each named
+# checkpoint of the opening motion, per runs 0003/0005/0006: S0 pops open on the initial push
+# (before any leg), S1 by leg_3, S2 by leg_6. Kept in sync with
+# robot_imitation_glue/hardware/bottle_sensor.py.
 SENSOR_CHECKPOINTS = {
-    "leg_3_end": [0, 1],
-    "leg_5_end": [0, 1, 2],
+    "push_end": [0],
+    "leg_3_end": [1],
+    "leg_6_end": [2],
 }
 
 DEPTH_NUDGE_M = 0.003  # metres to press deeper per retry attempt, along -cap_normal
-MAX_RETRIES_PER_CHECKPOINT = 3
+MAX_MOTION_RETRIES = 3  # how many times to retract and redo the whole push+legs motion
 
 
-def verify_checkpoint_and_retry(ur_left, sensor_logger, event_name, pose, cap_normal, move_speed=MOVE_SPEED):
-    """After reaching `pose` for `event_name`, check whether the sensor channels required
-    to be uncovered by this checkpoint (SENSOR_CHECKPOINTS) actually are. If not, nudge the
-    gripper DEPTH_NUDGE_M deeper along -cap_normal from its CURRENT position (same lateral
-    target, not a restart from the grip point) and retry in place, up to
-    MAX_RETRIES_PER_CHECKPOINT times -- the idea being the gripper likely slipped and
-    didn't press the tab open.
+def _check_checkpoint(sensor_logger, event_name):
+    """Evaluate the sensor-verified checkpoint for event_name, if SENSOR_CHECKPOINTS gates
+    it, logging a f"{event_name}_verify" sample either way.
 
-    Returns (pose_reached, retries_used). `pose_reached` is possibly deeper than the input
-    `pose` -- the caller should use it as the base for whatever move comes right after
-    this checkpoint. `retries_used * DEPTH_NUDGE_M` is the total depth correction applied
-    here; the caller should also carry that same correction into every LATER leg's
-    precomputed target (those were computed before any retry and don't know about it), or
-    the next leg's move will spring back up to the original, too-shallow height.
-
-    Events with no entry in SENSOR_CHECKPOINTS aren't gated -- returns (pose, 0) immediately.
+    Returns None if event_name isn't gated, True if gated and satisfied, False if gated and
+    not satisfied. Raises if no sensor sample has arrived yet -- otherwise a dead/disconnected
+    BLE connection would silently read as "still covered" forever.
     """
     required_channels = SENSOR_CHECKPOINTS.get(event_name)
     if not required_channels:
-        return pose, 0
+        return None
 
-    for attempt in range(MAX_RETRIES_PER_CHECKPOINT + 1):
-        reading = sensor_logger.current_reading()
-        sensor_logger.log_event(f"{event_name}_verify", attempt=attempt, reading=reading)
-        uncovered = [reading[ch] >= PER_CHANNEL_THRESHOLDS[ch] for ch in required_channels]
-        if all(uncovered):
-            if attempt > 0:
-                print(f"[verify] {event_name}: OK after {attempt} retry(ies), reading={np.round(reading, 2)}")
-            return pose, attempt
+    reading = sensor_logger.current_reading()
+    sensor_logger.log_event(f"{event_name}_verify", reading=reading)
+    if reading is None:
+        raise RuntimeError(f"No sensor samples received yet at {event_name} -- is the BLE sensor connected?")
 
-        missing = [f"S{ch}={reading[ch]:.2f}V(<{PER_CHANNEL_THRESHOLDS[ch]}V)"
-                   for ch, ok in zip(required_channels, uncovered) if not ok]
-        if attempt == MAX_RETRIES_PER_CHECKPOINT:
-            print(f"[verify] {event_name}: WARNING -- still not uncovered after {MAX_RETRIES_PER_CHECKPOINT} "
-                  f"retries ({', '.join(missing)}) -- continuing anyway")
-            return pose, attempt
+    if all(reading[ch] >= PER_CHANNEL_THRESHOLDS[ch] for ch in required_channels):
+        print(f"[verify] {event_name}: OK (reading={np.round(reading, 2)})")
+        return True
 
-        print(f"[verify] {event_name}: not yet uncovered ({', '.join(missing)}) -- pressing "
-              f"{DEPTH_NUDGE_M * 100:.1f}cm deeper and retrying (attempt {attempt + 1}/{MAX_RETRIES_PER_CHECKPOINT})")
-        pose = pose.copy()
-        pose[:3, 3] = pose[:3, 3] - DEPTH_NUDGE_M * cap_normal
-        ur_left.move_linear_to_tcp_pose(pose, linear_speed=move_speed).wait()
-    return pose, MAX_RETRIES_PER_CHECKPOINT
+    missing = [f"S{ch}={reading[ch]:.2f}V(<{PER_CHANNEL_THRESHOLDS[ch]}V)"
+               for ch in required_channels if reading[ch] < PER_CHANNEL_THRESHOLDS[ch]]
+    print(f"[verify] {event_name}: not uncovered ({', '.join(missing)}) -- will retract and redo the motion")
+    return False
+
+
+def _build_motion_segments(ur_left, sensor_logger, yawed_rotation, hover_position, approach_position, push_target, leg_targets):
+    """The motion as an ordered list of (label, execute_fn, checkpoint_event_or_None).
+    execute_fn(depth_offset) performs that segment's move(s) -- possibly deeper than
+    originally planned -- and returns the pose reached.
+
+    Segment order: approach (yaw+descend, ungated) -> push (push_end) -> leg2 (ungated) ->
+    leg3 (leg_3_end) -> leg4 (ungated) -> leg5 (ungated) -> leg6 (leg_6_end).
+    """
+
+    def do_approach(depth_offset):
+        # yaw the gripper about its own TCP z-axis (rotate in place at the hover position)
+        # to GRIPPER_YAW_DEG relative to the touch-point -> bottle-center axis
+        yaw_pose = np.eye(4)
+        yaw_pose[:3, :3] = yawed_rotation
+        yaw_pose[:3, 3] = hover_position
+        print(f"[move] yawing gripper to {GRIPPER_YAW_DEG:.0f} deg relative to the touch->center axis")
+        ur_left.move_linear_to_tcp_pose(yaw_pose, linear_speed=MOVE_SPEED).wait()
+
+        approach_pose = np.eye(4)
+        approach_pose[:3, :3] = yawed_rotation
+        approach_pose[:3, 3] = approach_position + depth_offset
+        print(f"[move] descending to {np.round(approach_pose[:3, 3], 4)}")
+        ur_left.move_linear_to_tcp_pose(approach_pose, linear_speed=MOVE_SPEED).wait()
+        sensor_logger.log_event("grip_point_reached", target=approach_pose[:3, 3].tolist())
+        return approach_pose
+
+    def do_push(depth_offset):
+        # a single moveL is already a straight Cartesian line -- no waypoints needed
+        push_pose = np.eye(4)
+        push_pose[:3, :3] = yawed_rotation
+        push_pose[:3, 3] = push_target + depth_offset
+        print(f"[push] straight line to {np.round(push_pose[:3, 3], 4)}")
+        ur_left.move_linear_to_tcp_pose(push_pose, linear_speed=MOVE_SPEED).wait()
+        sensor_logger.log_event("push_end", target=push_pose[:3, 3].tolist())
+        return push_pose
+
+    def make_do_leg(leg_number, angle_deg, offset, leg_target, event_name):
+        def do_leg(depth_offset):
+            leg_pose = np.eye(4)
+            leg_pose[:3, :3] = yawed_rotation
+            leg_pose[:3, 3] = leg_target + depth_offset
+            print(f"[push] leg {leg_number} ({angle_deg:.0f} deg from previous direction, {offset * 100:.0f}cm) to {np.round(leg_pose[:3, 3], 4)}")
+            ur_left.move_linear_to_tcp_pose(leg_pose, linear_speed=MOVE_SPEED).wait()
+            sensor_logger.log_event(event_name, leg_index=leg_number, angle_deg=angle_deg, offset_m=offset, target=leg_pose[:3, 3].tolist())
+            return leg_pose
+        return do_leg
+
+    segments = [("approach", do_approach, None), ("push", do_push, "push_end")]
+    for i, ((angle_deg, offset), leg_target) in enumerate(zip(LEGS, leg_targets)):
+        event_name = f"leg_{i + 2}_end"
+        checkpoint = event_name if event_name in SENSOR_CHECKPOINTS else None
+        segments.append((f"leg{i + 2}", make_do_leg(i + 2, angle_deg, offset, leg_target, event_name), checkpoint))
+    return segments
+
+
+def _previous_checkpoint_segment_index(segments, segment_index):
+    """The segment index of the checkpoint immediately before segments[segment_index]'s own
+    checkpoint, or None if segments[segment_index] is the first checkpoint in the motion."""
+    checkpoint_segment_indices = [i for i, (_, _, cp) in enumerate(segments) if cp is not None]
+    position = checkpoint_segment_indices.index(segment_index)
+    return checkpoint_segment_indices[position - 1] if position > 0 else None
+
+
+def run_opening_motion_with_retry(
+    ur_left, sensor_logger, hover_pose, yawed_rotation, hover_position,
+    approach_position, push_target, leg_targets, cap_normal,
+):
+    """Execute the yaw + descend + push + LEGS motion, gated by sensor-verified checkpoints
+    (push_end, leg_3_end, leg_6_end -- see SENSOR_CHECKPOINTS), pressing DEPTH_NUDGE_M
+    deeper into the cap on every retry (an identical replay would very likely just fail
+    identically) -- up to MAX_MOTION_RETRIES times.
+
+    Recovery is cascading rather than always a full restart: on a failed checkpoint, retract
+    to the hover pose and RE-CHECK the PRECEDING checkpoint's sensor.
+      - If that earlier checkpoint still holds, only this one slipped -- resume the motion
+        directly from the earlier checkpoint's own waypoint (deeper), skipping the segments
+        before it (they're still fine, no need to redo them).
+      - If the earlier checkpoint has ALSO lost its grip, the problem runs deeper than just
+        this leg -- restart the whole motion from the grip point.
+      - The first checkpoint (push_end) has no earlier checkpoint to fall back on, so its
+        failure always triggers a full restart.
+
+    Returns True once leg_6_end -- the checkpoint for the last channel to uncover -- passes,
+    False if MAX_MOTION_RETRIES is exhausted first.
+    """
+    segments = _build_motion_segments(ur_left, sensor_logger, yawed_rotation, hover_position, approach_position, push_target, leg_targets)
+
+    attempt = 0
+    resume_index = 0
+
+    while True:
+        depth_offset = -attempt * DEPTH_NUDGE_M * cap_normal
+
+        if attempt > 0:
+            print(
+                f"[verify] attempt {attempt}/{MAX_MOTION_RETRIES}: resuming from "
+                f"'{segments[resume_index][0]}', {attempt * DEPTH_NUDGE_M * 100:.1f}cm deeper"
+            )
+
+        checkpoint_failed_index = None
+        for segment_index in range(resume_index, len(segments)):
+            label, execute_fn, checkpoint_name = segments[segment_index]
+            execute_fn(depth_offset)
+
+            if segment_index == 0 and attempt == 0:
+                input("Press Enter to start the opening motion (Ctrl+C to abort)...")
+
+            if checkpoint_name is None:
+                continue
+            checkpoint_ok = _check_checkpoint(sensor_logger, checkpoint_name)
+            if checkpoint_ok is False:
+                checkpoint_failed_index = segment_index
+                break
+
+        if checkpoint_failed_index is None:
+            return True
+
+        if attempt == MAX_MOTION_RETRIES:
+            print(f"[verify] giving up after {MAX_MOTION_RETRIES} retries -- continuing anyway")
+            return False
+
+        print("[verify] retracting to the hover pose to check recovery state")
+        ur_left.move_linear_to_tcp_pose(hover_pose, linear_speed=MOVE_SPEED).wait()
+        sensor_logger.log_event("retract_to_hover", attempt=attempt)
+
+        previous_segment_index = _previous_checkpoint_segment_index(segments, checkpoint_failed_index)
+        if previous_segment_index is None:
+            resume_index = 0
+            print("[verify] no earlier checkpoint to fall back on -- restarting from the grip point")
+        else:
+            previous_checkpoint_name = segments[previous_segment_index][2]
+            if _check_checkpoint(sensor_logger, previous_checkpoint_name):
+                resume_index = previous_segment_index
+                print(f"[verify] '{previous_checkpoint_name}' still holds -- resuming from '{segments[previous_segment_index][0]}'")
+            else:
+                resume_index = 0
+                print(f"[verify] '{previous_checkpoint_name}' has also failed -- restarting from the grip point")
+
+        attempt += 1
 
 
 def pixel_to_point_on_cap_plane(pixel_xy, intrinsics, camera_pose_in_base, cap_pose_in_base):
@@ -286,6 +427,7 @@ def compute_yawed_gripper_orientation(cap_normal, reference_direction, yaw_deg):
     z_axis = -cap_normal
     x_axis = rotation_about_axis(cap_normal, np.radians(yaw_deg)) @ reference_direction
     x_axis = x_axis - z_axis * z_axis.dot(x_axis)  # keep exactly perpendicular to z
+    x_axis *= -1
     x_axis /= np.linalg.norm(x_axis)
     y_axis = np.cross(z_axis, x_axis)
     return orthonormalize_rotation(np.column_stack([x_axis, y_axis, z_axis]))
@@ -340,23 +482,14 @@ def save_touch_point_sample(image_bgr, overlay, hover_height, click_xy, detected
     print(f"[dataset] saved {prefix}  height={hover_height:.3f}  click={click_xy}  detected={detected_xy}")
 
 
-if __name__ == "__main__":
-    rr.init("open_bottle_demo", spawn=True)
-
-    # start the sensor BLE connection first -- it's the slowest thing to set up (scan +
-    # connect can take several seconds), so let it run in the background while the camera
-    # and robots initialize below, rather than delaying the start of logging until right
-    # before the motion.
-    sensor_logger = SensorLogger()
-    sensor_logger.start()
-
+def _main_body(sensor_logger):
     # 720p to match touch_point_detector's radius prior (calibrated on 720p frames);
     # intrinsics_matrix() returns the intrinsics for this stream resolution.
     camera = Realsense(resolution=Realsense.RESOLUTION_720, fps=15, enable_depth=False, enable_pointcloud=False)
     freeze_auto_exposure(camera)
     intrinsics = camera.intrinsics_matrix()
     ur_left = URrtde(ip_address=LEFT_ROBOT_IP)
-    ur_left.move_to_joint_configuration([ 0.06967844 ,-1.40953115 ,-1.61241627, -1.67278638 , 1.54791272 , 3.03650355],joint_speed=0.02).wait()
+    # ur_left.move_to_joint_configuration([ 0.06967844 ,-1.40953115 ,-1.61241627, -1.67278638 , 1.54791272 , 3.03650355],joint_speed=0.02).wait()
     # time.sleep(2)
     ur_right = URrtde(ip_address=RIGHT_ROBOT_IP)
     ur_right.rtde_control.teachMode()
@@ -368,7 +501,8 @@ if __name__ == "__main__":
     print(f"hover pose: {hover_pose}")
     print(f"Moving ur_left above the bottle cap at {hover_pose[:3, 3]}")
 
-    ur_left.move_linear_to_tcp_pose(hover_pose, linear_speed=0.01).wait()
+    ur_left.move_linear_to_tcp_pose(hover_pose, linear_speed=0.05).wait()
+    time.sleep(1)
     sensor_logger.log_event("hover_reached")
     cap_center = cap_pose[:3, 3]
     cap_normal = cap_pose[:3, 2]  # points outward from the cap, toward the gripper
@@ -388,7 +522,9 @@ if __name__ == "__main__":
 
     # verify/correct interactively, and grow the labeled dataset with this frame:
     # click_xy is the human-verified ground truth (the accepted detection, or the correction)
-    touch_pixel, corrected_pixel, verify_overlay = verify_or_correct_touch_point(image_bgr, detected_pixel)
+    touch_pixel, corrected_pixel, verify_overlay, image_bgr, detected_pixel = verify_or_correct_touch_point(
+        image_bgr, detected_pixel
+    )
     save_touch_point_sample(image_bgr, verify_overlay, hover_height, touch_pixel, detected_pixel)
     if corrected_pixel is not None:
         print(f"[verify] using corrected touch point {touch_pixel} (detection was {detected_pixel})")
@@ -435,6 +571,7 @@ if __name__ == "__main__":
     # --- rerun: image with detected touch point, grip point, push target + 3D view ---
     grip_pixel = project_point_to_pixel(grip_point, intrinsics, camera_pose_in_base)
     cap_center_pixel = project_point_to_pixel(cap_center, intrinsics, camera_pose_in_base)
+
     rr.log("camera/image", rr.Image(image_rgb, rr.ColorModel.RGB))
     rr.log("camera/image/touch_point", rr.Points2D([touch_pixel], colors=[(0, 255, 0)], radii=6.0, labels=["touch point"]))
     if corrected_pixel is not None and detected_pixel is not None:
@@ -457,51 +594,32 @@ if __name__ == "__main__":
     print(f"[detect] push end ({PUSH_TARGET_TANGENTIAL_OFFSET * 100:.1f}cm left of cap center)  push target (base frame)={np.round(push_target, 4)}")
     input("Check the detection in rerun. Press Enter to move the gripper to the grip point (Ctrl+C to abort)...")
 
-    # yaw the gripper about its own TCP z-axis (rotate in place at the hover position)
-    # to GRIPPER_YAW_DEG relative to the touch-point -> bottle-center axis
     yawed_rotation = compute_yawed_gripper_orientation(cap_normal, -outward, GRIPPER_YAW_DEG)
-    yaw_pose = np.eye(4)
-    yaw_pose[:3, :3] = yawed_rotation
-    yaw_pose[:3, 3] = start_pose[:3, 3]
-    print(f"[move] yawing gripper to {GRIPPER_YAW_DEG:.0f} deg relative to the touch->center axis")
-    ur_left.move_linear_to_tcp_pose(yaw_pose, linear_speed=MOVE_SPEED).wait()
 
-    # descend to the grip point (TANGENTIAL_OFFSET left of the touch point, APPROACH_OFFSET
-    # along the cap normal), keeping the yawed orientation
-    approach_pose = np.eye(4)
-    approach_pose[:3, :3] = yawed_rotation
-    approach_pose[:3, 3] = approach_position
-    print(f"[move] descending to {np.round(approach_position, 4)}")
-    ur_left.move_linear_to_tcp_pose(approach_pose, linear_speed=MOVE_SPEED).wait()
-    sensor_logger.log_event("grip_point_reached", target=approach_position.tolist())
+    opened = run_opening_motion_with_retry(
+        ur_left, sensor_logger, hover_pose, yawed_rotation, start_pose[:3, 3],
+        approach_position, push_target, leg_targets, cap_normal,
+    )
+    print(f"[done] opening motion {'succeeded' if opened else 'FAILED'}")
 
-    input("Press Enter to start the opening motion (Ctrl+C to abort)...")
-    # a single moveL is already a straight Cartesian line -- no waypoints needed
-    push_pose = approach_pose.copy()
-    push_pose[:3, 3] = push_target
-    print(f"[push] straight line to {np.round(push_target, 4)}")
-    ur_left.move_linear_to_tcp_pose(push_pose, linear_speed=MOVE_SPEED).wait()
-    sensor_logger.log_event("push_end", target=push_target.tolist())
-    push_pose, retries = verify_checkpoint_and_retry(ur_left, sensor_logger, "push_end", push_pose, cap_normal)
-    depth_correction = retries * DEPTH_NUDGE_M  # cumulative depth nudge, carried into every later leg's target
-
-    # chained legs, each at its angle relative to the previous leg's direction. Every
-    # target is offset by `depth_correction` along -cap_normal, so a retry's deeper press
-    # persists through the rest of the motion instead of springing back up on the next leg.
-    leg_pose = push_pose.copy()
-    for i, ((angle_deg, offset), leg_target) in enumerate(zip(LEGS, leg_targets)):
-        event_name = f"leg_{i + 2}_end"
-        leg_pose = leg_pose.copy()
-        leg_pose[:3, 3] = leg_target - depth_correction * cap_normal
-        print(f"[push] leg {i + 2} ({angle_deg:.0f} deg from previous direction, {offset * 100:.0f}cm) to {np.round(leg_pose[:3, 3], 4)}")
-        ur_left.move_linear_to_tcp_pose(leg_pose, linear_speed=MOVE_SPEED).wait()
-        sensor_logger.log_event(event_name, leg_index=i + 2, angle_deg=angle_deg, offset_m=offset, target=leg_pose[:3, 3].tolist())
-        leg_pose, retries = verify_checkpoint_and_retry(ur_left, sensor_logger, event_name, leg_pose, cap_normal)
-        depth_correction += retries * DEPTH_NUDGE_M
     ur_left.move_to_joint_configuration([ 0.06967844 ,-1.40953115 ,-1.61241627, -1.67278638 , 1.54791272 , 3.03650355])
     sensor_logger.log_event("retreat_home")
 
     run_index = len([n for n in os.listdir(SENSOR_LOG_DIR) if n.endswith(".json")]) if os.path.isdir(SENSOR_LOG_DIR) else 0
     sensor_logger.save(os.path.join(SENSOR_LOG_DIR, f"run_{run_index:04d}.json"))
 
-    print("[done] opening motion finished")
+
+if __name__ == "__main__":
+    rr.init("open_bottle_demo", spawn=True)
+
+    # start the sensor BLE connection first -- it's the slowest thing to set up (scan +
+    # connect can take several seconds), so let it run in the background while the camera
+    # and robots initialize below, rather than delaying the start of logging until right
+    # before the motion.
+    sensor_logger = SensorLogger()
+    sensor_logger.start()
+
+    try:
+        _main_body(sensor_logger)
+    finally:
+        sensor_logger.stop()

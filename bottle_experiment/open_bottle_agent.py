@@ -278,7 +278,9 @@ if __name__ == "__main__":
         image_bgr = ImageConverter.from_numpy_int_format(image_rgb).image_in_opencv_format
 
         detected_pixel = detect_touch_point(image_bgr, hover_height)
-        touch_pixel, corrected_pixel, verify_overlay = verify_or_correct_touch_point(image_bgr, detected_pixel)
+        touch_pixel, corrected_pixel, verify_overlay, image_bgr, detected_pixel = verify_or_correct_touch_point(
+            image_bgr, detected_pixel
+        )
         save_touch_point_sample(image_bgr, verify_overlay, hover_height, touch_pixel, detected_pixel)
         if corrected_pixel is not None:
             print(f"[verify] using corrected touch point {touch_pixel} (detection was {detected_pixel})")

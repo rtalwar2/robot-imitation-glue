@@ -318,19 +318,31 @@ def collect_data_bottle_opening(env, dataset_recorder, frequency=10, bottle_pose
             camera_pose_in_base = current_pose @ tcp_left_to_camera
             hover_height = float(cap_normal.dot(current_pose[:3, 3] - cap_center))
 
-            obs = env.get_observations()
-            image_rgb = obs["wrist_image_original"]
-            image_bgr = ImageConverter.from_numpy_int_format(image_rgb).image_in_opencv_format
-            if image_bgr.shape[:2] != (720, 1280):
-                logger.warning(
-                    f"wrist camera resolution is {image_bgr.shape[:2]}, but touch_point_detector's radii "
-                    "were calibrated on 720p (1280x720) frames -- detection may be inaccurate. "
-                    "(CameraFactory.create_wrist_camera requests 720p and no longer falls back, so this "
-                    "means the frame is being resized somewhere downstream.)"
-                )
+            def grab_and_detect():
+                """A fresh wrist frame with the touch-point detector run on it.
 
-            detected_pixel = detect_touch_point(image_bgr, hover_height)
-            touch_pixel, corrected_pixel, verify_overlay = verify_or_correct_touch_point(image_bgr, detected_pixel)
+                The arm is stationary at the hover pose throughout verification, so re-grabbing
+                does not invalidate hover_height, camera_pose_in_base or cap_pose.
+                """
+                image_bgr = ImageConverter.from_numpy_int_format(
+                    env.get_observations()["wrist_image_original"]
+                ).image_in_opencv_format
+                if image_bgr.shape[:2] != (720, 1280):
+                    logger.warning(
+                        f"wrist camera resolution is {image_bgr.shape[:2]}, but touch_point_detector's radii "
+                        "were calibrated on 720p (1280x720) frames -- detection may be inaccurate. "
+                        "(CameraFactory.create_wrist_camera requests 720p and no longer falls back, so this "
+                        "means the frame is being resized somewhere downstream.)"
+                    )
+                return image_bgr, detect_touch_point(image_bgr, hover_height)
+
+            image_bgr, detected_pixel = grab_and_detect()
+            # regrab lets 't' replace a blurred/occluded frame instead of forcing a choice
+            # between accepting a bad grab and aborting the episode.
+            touch_pixel, corrected_pixel, verify_overlay, image_bgr, detected_pixel = verify_or_correct_touch_point(
+                image_bgr, detected_pixel, regrab=grab_and_detect
+            )
+            image_rgb = ImageConverter.from_opencv_format(image_bgr).image_in_numpy_int_format
             save_touch_point_sample(image_bgr, verify_overlay, hover_height, touch_pixel, detected_pixel)
             if corrected_pixel is not None:
                 print(f"[verify] using corrected touch point {touch_pixel} (detection was {detected_pixel})")
