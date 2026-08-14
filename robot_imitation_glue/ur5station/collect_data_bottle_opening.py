@@ -66,8 +66,23 @@ if __name__ == "__main__":
     else:
         split, n_poses = "test", 5
 
+    # Pose indices to skip, per split. Indices are per-split because each split is seeded
+    # differently, so index 0 of "test" is a different pose from index 0 of "train". Excluding an
+    # index does not shift the others (see generate_reachable_bottle_poses), so the generator just
+    # samples one extra pose to make up the count.
+    #
+    # Only exclude poses that are impractical to *collect* on -- the bottle cannot be re-closed by
+    # hand between episodes, the right arm fouls something, and so on. Excluding a pose because the
+    # robot finds the task hard there biases the success rate upward, and for the test split that
+    # directly inflates the headline result. Reachability is already filtered by
+    # is_tcp_pose_reachable / is_opening_motion_reachable, so anything reaching this list is a
+    # judgement call worth writing down.
+    POSE_BLACKLIST = {"train": [], "val": [], "test": [0]}
+
     rng = np.random.default_rng(RANDOM_SEED + SPLIT_SEED_OFFSETS[split])
-    bottle_poses = generate_reachable_bottle_poses(n_poses, env.robot, env.robot_right, rng)
+    bottle_poses = generate_reachable_bottle_poses(
+        n_poses, env.robot, env.robot_right, rng, blacklist=POSE_BLACKLIST[split]
+    )
 
     collect_data_bottle_opening(
         env,

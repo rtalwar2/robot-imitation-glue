@@ -181,10 +181,23 @@ def is_opening_motion_reachable(cap_pose, ur_left):
     return True
 
 
-def generate_reachable_bottle_poses(n_poses, ur_left, ur_right, rng):
+def generate_reachable_bottle_poses(n_poses, ur_left, ur_right, rng, blacklist=()):
     """Sample cap poses until n_poses pass all constraints. Returns a list of
-    (tcp_right_pose, cap_pose) tuples."""
+    (tcp_right_pose, cap_pose) tuples.
+
+    `blacklist` holds 0-based *pose indices* to skip. The index counts every pose that passes
+    the constraints, blacklisted ones included, so the numbering does not shift when something
+    is excluded: blacklisting index 0 and asking for 5 poses returns what would have been
+    indices 1-5, and keeps sampling until it has 5. That stability holds because a pose is only
+    rejected after `sample_cap_pose` has drawn it, and rejecting it consumes no further
+    randomness -- so every other index still refers to exactly the same pose it did before.
+
+    Indices are only meaningful for a given rng seed. Since each split is seeded differently,
+    a blacklist belongs to one split and means nothing in another.
+    """
+    blacklist = set(blacklist)
     accepted = []
+    pose_index = 0  # counts constraint-passing poses, including blacklisted ones
     for attempt in range(1, MAX_SAMPLE_ATTEMPTS + 1):
         if len(accepted) == n_poses:
             break
@@ -206,13 +219,27 @@ def generate_reachable_bottle_poses(n_poses, ur_left, ur_right, rng):
         if not is_opening_motion_reachable(cap_pose, ur_left):
             continue
 
+        index = pose_index
+        pose_index += 1
+        if index in blacklist:
+            print(f"[generate] pose index {index} is blacklisted -- skipping "
+                  f"(cap center={np.round(cap_pose[:3, 3], 3)})")
+            continue
+
         accepted.append((tcp_right, cap_pose))
-        print(f"[generate] pose {len(accepted)}/{n_poses} accepted after {attempt} attempts: "
+        print(f"[generate] pose {len(accepted)}/{n_poses} (index {index}) accepted after {attempt} attempts: "
               f"cap center={np.round(cap_pose[:3, 3], 3)} tilt from vertical="
               f"{np.degrees(np.arccos(np.clip(cap_pose[2, 2], -1, 1))):.0f} deg")
     else:
         print(f"[generate] WARNING: only {len(accepted)}/{n_poses} poses found in {MAX_SAMPLE_ATTEMPTS} attempts "
               "-- widen the box / tilt limits, or check the reachability constraints")
+
+    unused = blacklist - set(range(pose_index))
+    if unused:
+        # A blacklist entry beyond the last index generated never fired, so it is either a typo
+        # or left over from a different seed / n_poses -- either way it is silently doing nothing.
+        print(f"[generate] WARNING: blacklist indices {sorted(unused)} were never reached "
+              f"(only {pose_index} poses generated) -- wrong split's blacklist, or a typo?")
     return accepted
 
 
