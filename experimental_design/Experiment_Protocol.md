@@ -170,7 +170,7 @@ The policy predicts `[delta_xyz_tool(3), rot6d(R_delta)(6)]` — a translation o
 
 *Design C:* normalize the instrumentation channels with the **same normalizer lerobot applies to the action dims** (dataset mean/std). Mixed scales inside one denoised vector give the network badly conditioned inputs even though the loss is fine.
 
-*Design A:* normalize to the **calibrated covered/uncovered range** of each channel, not the raw hardware range. For the bottle sensor, covered sits at ~2.2-3.1 V and uncovered at ~3.2-3.3 V against a 0-3.3 V ADC span (`bottle_sensor.py:14-19`) — dividing by 3.3 V compresses the entire useful signal into the top third of the range. The calibrated range comes from the sensor logs, is fixed before training, and is identical across all reduction levels, so there is still zero leakage.
+*Design A:* normalize to each channel's **measured operating range**, not the raw hardware range. Against a 0–3.3 V ADC span, the bottle sensor only ever traverses S0 2.96–3.25 V, S1 2.48–3.29 V, S2 2.08–3.25 V (global min/max over `sensor_logs/run_{0003,0005,0006}.json`, the runs under the current sensor layout — runs 0000–0002 used a different layout and are not comparable). Dividing by 3.3 V would compress the entire useful signal into a fraction of the range. These ranges come from separate calibration runs rather than the demonstration set, and are fixed before training and identical across all reduction levels, so there is no leakage. Re-derive alongside `PER_CHANNEL_THRESHOLDS` whenever the cap, sensor mounting or motion geometry changes.
 
 **Auxiliary loss weighting (design C) is nearly free.** With `prediction_type=epsilon` every channel's regression target is the sampled noise ε ~ N(0, I), so all channels sit on the same loss scale regardless of what the underlying quantity is. With mean reduction over 12 channels, the 3 instrumentation dims take 3/12 = 25% of the objective automatically. No λ sweep, no gradient-norm matching. Just be deliberate that channel count sets the weight: three phototransistors give the instrumentation 25%, one gives it 10%.
 
@@ -233,7 +233,9 @@ The only task running all four variants. It decides the mechanism for everything
 
 **Instrumentation.** Three phototransistor channels inside the cap, published over DDS on topic `Bottle`, read into `obs["bottle_sensor"]` (`bottle_sensor.py:36-53`). Continuous, 3-dim.
 
-**Success.** All three channels above their per-channel uncovered thresholds at the end of the motion.
+**Success.** Each channel passes its own checkpoint at its own stage of the motion: S0 at `push_end`, S1 at `leg_3_end`, S2 at `leg_6_end` (`SENSOR_CHECKPOINTS`). A failed checkpoint triggers a retry, so an episode only succeeds once all three have passed — but at their respective moments, not simultaneously at the end. Failed episodes are deleted during collection rather than saved and filtered later.
+
+> ⚠️ This rests on an assumption worth testing: that a channel does not re-cover once uncovered. In `run_0006` all three channels produce readings above their thresholds that later fall back below, before the final sustained transition — and that run contains no retry, so it is not retraction-induced. Whether it would cause a false checkpoint pass depends on whether an excursion coincides with a checkpoint evaluation, which has not been checked. Worth resolving before large-scale collection, since it affects the success label itself and not just a downstream metric.
 
 **Generalization axis — appearance only.** There is one physical bottle and one cap; no variants are 3D printed. OOD is produced by changing the bottle's **visual appearance** — stickers, tape, patterns, matte vs. glossy — while the mechanism stays identical. Train on one set of appearances, evaluate OOD on unseen ones.
 

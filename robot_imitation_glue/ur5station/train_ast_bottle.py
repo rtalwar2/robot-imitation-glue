@@ -42,12 +42,19 @@ from transformers import Trainer, TrainingArguments
 AUDIO_KEY = "observation.audio.spectogram_values"
 SENSOR_KEY = "bottle_sensor"
 
-# Per-channel covered -> uncovered voltage spans, from the runs analysed in
-# robot_imitation_glue/hardware/bottle_sensor.py. Used instead of the raw 0-3.3V ADC range, which
-# would squeeze the entire useful signal into the top third, and instead of dataset min/max, which
-# would differ between data levels. Fixed before training, so no leakage. Re-derive these together
-# with PER_CHANNEL_THRESHOLDS whenever the cap, sensor mounting or opening motion changes.
-CALIBRATED_RANGE = ((2.25, 3.24), (2.69, 3.28), (2.24, 3.23))
+# Per-channel operating range, measured as the global min/max of each channel across
+# bottle_experiment/sensor_logs/run_{0003,0005,0006}.json -- the three runs recorded under the
+# current sensor layout and motion parameters. Runs 0000-0002 used a different layout and are not
+# comparable; the earlier constants here were derived from them.
+#
+# Used instead of the raw 0-3.3V ADC range, which would squeeze the whole useful signal into the
+# top fraction of [0,1], and instead of dataset min/max, which would differ between data levels and
+# leak. These come from separate calibration runs rather than the demonstration set and are fixed
+# before training, so there is no leakage and the scaling is identical at every data level.
+#
+# Re-derive together with PER_CHANNEL_THRESHOLDS whenever the cap, sensor mounting or opening
+# motion changes.
+CALIBRATED_RANGE = ((2.96, 3.25), (2.48, 3.29), (2.08, 3.25))
 
 VALIDATION_FRACTION = 0.2
 
