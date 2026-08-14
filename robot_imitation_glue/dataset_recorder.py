@@ -23,6 +23,9 @@ class DummyDatasetRecorder(BaseDatasetRecorder):
     def save_episode(self):
         print("saving dataset episode")
 
+    def set_episode_success(self, success):
+        print("labeling dataset episode success:", success)
+
     @property
     def n_recorded_episodes(self):
         return 0
@@ -228,6 +231,12 @@ class LeRobotDatasetRecorder(BaseDatasetRecorder):
 
     def delete_episode(self):
         self.lerobot_dataset.clear_episode_buffer()
+
+    def set_episode_success(self, success):
+        # matches add_frame()'s own torch->numpy conversion, so every entry in the buffer
+        # stays the same type whether it was set live or patched retroactively here.
+        episode_buffer = self.lerobot_dataset.writer.episode_buffer
+        episode_buffer["next.success"] = [np.array([bool(success)])] * episode_buffer["size"]
 
     def save_episode(self):
         self.lerobot_dataset.save_episode()

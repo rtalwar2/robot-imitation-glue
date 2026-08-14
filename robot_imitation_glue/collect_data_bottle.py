@@ -101,28 +101,29 @@ def servo_to_waypoint(
     pos_tol=0.001,
     rot_tol_rad=0.02,
     max_steps=2000,
-    success=False,
 ):
     """Fixed-rate replacement for `move_linear_to_tcp_pose(target_pose).wait()`: servoes the
     left arm to target_pose, recording one (obs, policy_action) frame per control cycle.
-    Returns the pose actually reached (== target_pose, modulo tolerance)."""
+    Returns the pose actually reached (== target_pose, modulo tolerance).
+
+    Frames are recorded with the dataset default `next.success=False` -- an episode's
+    outcome is only knowable in hindsight (the checkpoint for a segment is only checked
+    AFTER that segment's frames are already recorded), so the caller must retroactively
+    label the whole episode via dataset_recorder.set_episode_success() once the outcome is
+    known, rather than trying to pass the right value in here per step.
+    """
     current_pose = env.get_robot_pose_se3()
-    print("in servo function")
-    print(f"current_pose: {current_pose}")
 
     for _ in range(max_steps):
         if _pose_reached(current_pose, target_pose, pos_tol, rot_tol_rad):
             break
-        # print("finish pose reached")
         cycle_end_time = time.time() + control_period
         obs = env.get_observations()
         step_action = _tool_frame_step(current_pose, target_pose, max_translation_step, max_rotation_step_rad)
         policy_action = step_action_to_policy_action_6d(step_action)
         next_pose = policy_action_to_tcp_pose(current_pose, policy_action)
-        dataset_recorder.record_step(obs, policy_action, success=success)
-        # print(f"nextpose: {next_pose}")
+        dataset_recorder.record_step(obs, policy_action)
         env.act_tcp(next_pose, time.time() + control_period)
-        # print("finish next pose")
         for channel_index, voltage in enumerate(obs["bottle_sensor"]):
             rr.log(f"bottle_sensor/S{channel_index}", rr.Scalars(float(voltage)))
         precise_wait(cycle_end_time)
@@ -132,75 +133,141 @@ def servo_to_waypoint(
     return current_pose
 
 
-def run_opening_motion_with_retry(env, dataset_recorder, plan, cap_normal, hover_pose, control_period):
-    """Execute the descend + push + LEGS motion, gated by sensor-verified checkpoints
-    (leg_3_end, leg_6_end -- see SENSOR_CHECKPOINTS). If a checkpoint isn't satisfied, this
-    retracts to the hover pose and redoes the WHOLE motion from the grip point again,
-    pressing DEPTH_NUDGE_M deeper into the cap each attempt (an identical replay would very
-    likely just fail identically) -- up to MAX_MOTION_RETRIES times. The retraction and
-    every redo are recorded as ordinary steps, so a slipped grip and its recovery become
-    part of the demonstration.
+def _check_checkpoint(env, event_name):
+    """Evaluate the sensor-verified checkpoint for event_name, if SENSOR_CHECKPOINTS gates it.
 
-    Returns (final_pose, success): success is True only once leg_6_end -- the checkpoint
-    that requires all 3 channels uncovered -- has passed.
+    Returns None if event_name isn't gated, True if gated and satisfied, False if gated and
+    not satisfied. Raises if the sensor feed has never delivered a real sample (see
+    BottleSensorSubscriber.has_received_sample) -- otherwise a dead/disconnected
+    bottle_ble_reader.py would silently read as "still covered" forever.
+    """
+    required_channels = SENSOR_CHECKPOINTS.get(event_name)
+    if not required_channels:
+        return None
+
+    reading = env.get_observations()["bottle_sensor"]
+    if not env.bottle_sensor.has_received_sample():
+        raise RuntimeError(
+            f"bottle_sensor has never received a DDS sample (still reading {reading} at "
+            f"{event_name}) -- is bottle_ble_reader.py running and connected? Every "
+            "checkpoint will otherwise read as 'covered' forever and the motion will just "
+            "keep retrying against a dead sensor feed."
+        )
+
+    if is_uncovered(reading, required_channels):
+        logger.info(f"[verify] {event_name}: OK (reading={np.round(reading, 2)})")
+        return True
+    logger.info(f"[verify] {event_name}: not uncovered (reading={np.round(reading, 2)}) -- will redo the motion")
+    return False
+
+
+def _build_motion_segments(plan):
+    """The motion as an ordered list of (label, base_target_pose, checkpoint_event_or_None).
+
+    Segment order: approach (yaw+descend, ungated) -> push (push_end) -> leg2 (ungated) ->
+    leg3 (leg_3_end) -> leg4 (ungated) -> leg5 (ungated) -> leg6 (leg_6_end).
     """
     approach_pose, push_pose, *leg_poses = plan["waypoint_poses"]
+    segments = [("approach", approach_pose, None), ("push", push_pose, "push_end")]
+    for leg_index, leg_pose in enumerate(leg_poses):
+        angle_deg, offset = LEGS[leg_index]
+        event_name = f"leg_{leg_index + 2}_end"
+        checkpoint = event_name if event_name in SENSOR_CHECKPOINTS else None
+        label = f"leg{leg_index + 2} ({angle_deg:.0f} deg from previous direction, {offset * 100:.0f}cm)"
+        segments.append((label, leg_pose, checkpoint))
+    return segments
 
-    reached_pose = approach_pose
-    for attempt in range(MAX_MOTION_RETRIES + 1):
+
+def _previous_checkpoint_segment_index(segments, segment_index):
+    """The segment index of the checkpoint immediately before segments[segment_index]'s own
+    checkpoint, or None if segments[segment_index] is the first checkpoint in the motion."""
+    checkpoint_segment_indices = [i for i, (_, _, cp) in enumerate(segments) if cp is not None]
+    position = checkpoint_segment_indices.index(segment_index)
+    return checkpoint_segment_indices[position - 1] if position > 0 else None
+
+
+def run_opening_motion_with_retry(env, dataset_recorder, plan, cap_normal, hover_pose, control_period):
+    """Execute the descend + push + LEGS motion, gated by sensor-verified checkpoints
+    (push_end, leg_3_end, leg_6_end -- see SENSOR_CHECKPOINTS), pressing DEPTH_NUDGE_M
+    deeper into the cap on every retry (an identical replay would very likely just fail
+    identically) -- up to MAX_MOTION_RETRIES times.
+
+    Recovery is cascading rather than always a full restart: on a failed checkpoint, retract
+    to the hover pose and RE-CHECK the PRECEDING checkpoint's sensor.
+      - If that earlier checkpoint still holds, only that slipped -- resume the motion
+        directly from the earlier checkpoint's own waypoint (deeper), skipping the segments
+        before it (they're still fine, no need to redo them).
+      - If the earlier checkpoint has ALSO lost its grip, the problem runs deeper than just
+        this leg -- restart the whole motion from the grip point.
+      - The first checkpoint (push_end) has no earlier checkpoint to fall back on, so its
+        failure always triggers a full restart.
+    The retraction and every (partial or full) redo are recorded as ordinary steps, so a
+    slipped grip and its recovery become part of the demonstration.
+
+    Returns (final_pose, success): success is True only once leg_6_end -- the checkpoint
+    for the last channel to uncover -- has passed.
+    """
+    segments = _build_motion_segments(plan)
+
+    attempt = 0
+    resume_index = 0
+    reached_pose = segments[0][1]
+    episode_success = False
+
+    while True:
         depth_offset = -attempt * DEPTH_NUDGE_M * cap_normal
-        attempt_approach = approach_pose.copy()
-        attempt_approach[:3, 3] = attempt_approach[:3, 3] + depth_offset
-        attempt_push = push_pose.copy()
-        attempt_push[:3, 3] = attempt_push[:3, 3] + depth_offset
 
         if attempt > 0:
             logger.info(
-                f"[verify] retry {attempt}/{MAX_MOTION_RETRIES}: redoing the opening motion "
-                f"{attempt * DEPTH_NUDGE_M * 100:.1f}cm deeper"
+                f"[verify] attempt {attempt}/{MAX_MOTION_RETRIES}: resuming from "
+                f"'{segments[resume_index][0]}', {attempt * DEPTH_NUDGE_M * 100:.1f}cm deeper"
             )
 
-        print(f"[move] yaw + descend to grip point {np.round(attempt_approach[:3, 3], 4)}")
-        servo_to_waypoint(env, dataset_recorder, attempt_approach, control_period)
-
-        print(f"[push] straight line to {np.round(attempt_push[:3, 3], 4)}")
-        reached_pose = servo_to_waypoint(env, dataset_recorder, attempt_push, control_period)
-
-        checkpoint_failed = False
         episode_success = False
-        for leg_index, leg_pose in enumerate(leg_poses):
-            angle_deg, offset = LEGS[leg_index]
-            attempt_leg_pose = leg_pose.copy()
-            attempt_leg_pose[:3, 3] = attempt_leg_pose[:3, 3] + depth_offset
-            print(f"[push] leg {leg_index + 2} ({angle_deg:.0f} deg from previous direction, {offset * 100:.0f}cm)")
-            reached_pose = servo_to_waypoint(
-                env, dataset_recorder, attempt_leg_pose, control_period, success=episode_success
-            )
+        checkpoint_failed_index = None
+        for segment_index in range(resume_index, len(segments)):
+            label, base_pose, checkpoint_name = segments[segment_index]
+            target_pose = base_pose.copy()
+            target_pose[:3, 3] = target_pose[:3, 3] + depth_offset
+            print(f"[move] {label} -> {np.round(target_pose[:3, 3], 4)}")
+            reached_pose = servo_to_waypoint(env, dataset_recorder, target_pose, control_period)
 
-            event_name = f"leg_{leg_index + 2}_end"
-            required_channels = SENSOR_CHECKPOINTS.get(event_name)
-            if not required_channels:
+            if checkpoint_name is None:
                 continue
-
-            reading = env.get_observations()["bottle_sensor"]
-            if is_uncovered(reading, required_channels):
-                logger.info(f"[verify] {event_name}: OK (reading={np.round(reading, 2)})")
-                if event_name == "leg_6_end":
-                    episode_success = True
-            else:
-                logger.info(f"[verify] {event_name}: not uncovered (reading={np.round(reading, 2)}) -- will redo the motion")
-                checkpoint_failed = True
+            checkpoint_ok = _check_checkpoint(env, checkpoint_name)
+            if checkpoint_ok is False:
+                checkpoint_failed_index = segment_index
                 break
+            if checkpoint_ok is True and checkpoint_name == "leg_6_end":
+                episode_success = True
 
-        if not checkpoint_failed:
+        if checkpoint_failed_index is None:
             return reached_pose, episode_success
 
         if attempt == MAX_MOTION_RETRIES:
             logger.warning(f"[verify] giving up after {MAX_MOTION_RETRIES} retries -- continuing anyway")
             return reached_pose, False
 
-        print("[verify] retracting to the hover pose to redo the opening motion")
+        print("[verify] retracting to the hover pose to check recovery state")
         servo_to_waypoint(env, dataset_recorder, hover_pose.copy(), control_period)
+
+        previous_segment_index = _previous_checkpoint_segment_index(segments, checkpoint_failed_index)
+        if previous_segment_index is None:
+            resume_index = 0
+            logger.info("[verify] no earlier checkpoint to fall back on -- restarting from the grip point")
+        else:
+            previous_checkpoint_name = segments[previous_segment_index][2]
+            if _check_checkpoint(env, previous_checkpoint_name):
+                resume_index = previous_segment_index
+                logger.info(
+                    f"[verify] '{previous_checkpoint_name}' still holds -- resuming from "
+                    f"'{segments[previous_segment_index][0]}'"
+                )
+            else:
+                resume_index = 0
+                logger.info(f"[verify] '{previous_checkpoint_name}' has also failed -- restarting from the grip point")
+
+        attempt += 1
 
     return reached_pose, False
 
@@ -223,6 +290,13 @@ def collect_data_bottle_opening(env, dataset_recorder, frequency=10, bottle_pose
             input("Press Enter to move the LEFT arm to the retracted home pose (Ctrl+C to abort)...")
             print("[move] retreating ur_left home")
             env.robot.move_to_joint_configuration(LEFT_HOME_JOINTS, joint_speed=LEFT_TRANSIT_JOINT_SPEED).wait()
+
+            # Zero the FT drift at the home pose, which is the one configuration that is identical
+            # every episode -- the payload's gravity contribution is therefore constant here, so any
+            # episode-to-episode change in the reading is drift. Must happen before the right arm
+            # moves the bottle, so nothing is in contact. The raw reading is still what gets
+            # recorded; this only publishes the offset alongside it.
+            env.capture_ft_bias()
 
             pose_index = dataset_recorder.n_recorded_episodes % len(bottle_poses)
             rr.set_time("pose", sequence=dataset_recorder.n_recorded_episodes)
@@ -280,18 +354,33 @@ def collect_data_bottle_opening(env, dataset_recorder, frequency=10, bottle_pose
             print("[move] lifting off the cap")
             servo_to_waypoint(
                 env, dataset_recorder, lift_pose, control_period,
-                max_translation_step=RETREAT_SPEED * control_period, success=episode_success,
+                max_translation_step=RETREAT_SPEED * control_period,
             )
-
-            dataset_recorder.save_episode()
-            print(f"[episode] saved, success={episode_success}")
 
             print("[move] retreating ur_left home")
             env.robot.move_to_joint_configuration(LEFT_HOME_JOINTS, joint_speed=LEFT_TRANSIT_JOINT_SPEED).wait()
 
-            if event.quit:
-                break
-            input("Close the bottle by hand, then press Enter to continue to the next pose...")
+            # every frame so far was recorded with the dataset default next.success=False --
+            # the true outcome is only known now, so label the whole episode retroactively.
+            dataset_recorder.set_episode_success(episode_success)
+
+            if episode_success:
+                dataset_recorder.save_episode()
+                print(f"[episode] saved (episode {dataset_recorder.n_recorded_episodes - 1})")
+                if event.quit:
+                    break
+                input("Close the bottle by hand, then press Enter to continue to the next pose...")
+            else:
+                dataset_recorder.delete_episode()
+                print(
+                    f"[episode] FAILED to open the bottle after {MAX_MOTION_RETRIES} retries -- "
+                    "discarding this recording."
+                )
+                if event.quit:
+                    break
+                # n_recorded_episodes didn't change, so the next loop iteration retries this same
+                # pose -- every generated pose ends up with exactly one successful recorded demo.
+                input("Close the cap again and rotate it a bit, then press Enter to retry this pose...")
     finally:
         listener.stop()
         dataset_recorder.finish_recording()

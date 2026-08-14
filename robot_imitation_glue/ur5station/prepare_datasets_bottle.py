@@ -75,6 +75,7 @@ def _rename_features(features: dict) -> dict:
     features["observation.state"] = features.pop("robot_pose")
     features["observation.state"]["shape"] = (12,)
     features.pop("ft")
+    features.pop("ft_bias")
 
     # The fork's audio branch keys off exactly this name.
     features["observation.audio.spectogram_values"] = features.pop("spectogram_values")
@@ -98,10 +99,16 @@ def _frame_transform(action_dims: int):
     def transform(frame: dict) -> dict:
         new_frame = frame.copy()
         new_frame["observation.images.wrist_image"] = new_frame.pop("wrist_image")
+        # `ft - ft_bias` applies the per-episode drift correction here rather than at collection
+        # time, so the recording keeps the raw signal and the correction stays inspectable and
+        # redoable. ft_bias is constant within an episode (captured at the fixed home pose before
+        # anything is in contact) and is all-zeros for episodes recorded before this was added,
+        # where it degrades to a no-op.
         new_frame["observation.state"] = np.concatenate(
             (
                 np.asarray(new_frame.pop("robot_pose"), dtype=np.float32),
-                np.asarray(new_frame.pop("ft"), dtype=np.float32),
+                np.asarray(new_frame.pop("ft"), dtype=np.float32)
+                - np.asarray(new_frame.pop("ft_bias"), dtype=np.float32),
             )
         )
         new_frame["observation.audio.spectogram_values"] = new_frame.pop("spectogram_values")

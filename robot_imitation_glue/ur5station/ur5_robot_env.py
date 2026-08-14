@@ -101,6 +101,12 @@ class UR5eStation(BaseEnv):
             logger.info("creating FT subscriber")
             self.ft_subscriber = FTSubscriber("FT")
 
+        # Per-episode zero offset for the FT sensor, filled by capture_ft_bias(). Published in the
+        # observation dict alongside the RAW reading rather than subtracted from it, so the
+        # correction stays reversible and auditable downstream. Zeros mean "not captured", which
+        # is a no-op correction.
+        self.ft_bias = np.zeros(6, dtype=np.float32)
+
         if self.with_spectogram:
             logger.info("creating spectogram subscriber")
             self.spectogram_subscriber = SpectrogramSubscriberKaldi("KaldiSpectrogram")
@@ -211,6 +217,43 @@ class UR5eStation(BaseEnv):
     #     logger.info(f"get_observations time: {time.time() - start_time}")
 
     #     return obs_dict
+    def capture_ft_bias(self, n_samples=20, settle_seconds=0.5):
+        """Record the FT reading at the CURRENT pose as this episode's zero offset.
+
+        The internal FT sensor drifts with temperature over tens of minutes. Left uncorrected that
+        drift is not just noise: episodes recorded close together share an offset, so if conditions
+        are collected in blocks the offset becomes a shortcut feature identifying the condition --
+        inflating in-distribution success and collapsing out-of-distribution.
+
+        Call this at a FIXED joint configuration (the arm's home pose), never at a pose that varies
+        per episode: the reading includes the payload's gravity contribution, so a baseline taken at
+        a varying orientation would fold a varying gravity term into the "zero" and inject exactly
+        the per-episode offset it is meant to remove.
+
+        Note this cancels drift, not gravity. Subtracting a home-pose baseline from readings taken
+        elsewhere leaves `gravity_at_pose - gravity_at_home`. UR documents `actual_TCP_force` as
+        compensated for the payload, which would make that residual negligible -- but only if the
+        payload mass and CoG are configured in the controller. Verify by moving through the task's
+        orientations with nothing in contact and checking the reading stays put.
+
+        `settle_seconds` matters: move_to_joint_configuration().wait() returns when the motion
+        command completes, but the arm still rings, and that shows up in the FT.
+        """
+        if not self.use_internal_ft:
+            raise NotImplementedError("capture_ft_bias only supports the internal FT sensor")
+
+        time.sleep(settle_seconds)
+        samples = []
+        for _ in range(n_samples):
+            samples.append(np.array(self.robot.rtde_receive.getActualTCPForce(), dtype=np.float32))
+            time.sleep(1.0 / CAMERA_UPDATE_HZ)
+
+        samples = np.stack(samples)
+        self.ft_bias = samples.mean(axis=0).astype(np.float32)
+        spread = samples.max(axis=0) - samples.min(axis=0)
+        logger.info(f"FT bias captured: {np.round(self.ft_bias, 3)} (peak-to-peak {np.round(spread, 3)})")
+        return self.ft_bias
+
     def get_observations(self):
 
         wrist_image = self._wrist_camera_subscriber.get_rgb_image_as_int()
@@ -239,7 +282,8 @@ class UR5eStation(BaseEnv):
             "robot_pose": robot_state,
             "gripper_state": gripper_state,
             "joints": joints,
-            "ft": ft,
+            "ft": ft,  # raw; the drift correction is `ft - ft_bias`, applied at dataset-prep time
+            "ft_bias": self.ft_bias,
         }
 
         if self.with_spectogram:

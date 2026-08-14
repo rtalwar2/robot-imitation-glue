@@ -51,7 +51,7 @@ IMAGE_KEY = "observation.images.wrist_image"
 STATE_KEY = "observation.state"
 SENSOR_KEY = "bottle_sensor"
 
-# observation.state is [tcp_pose(6), ft(6)] -- see ur5station/prepare_datasets_bottle.py.
+# observation.state is [tcp_pose(6), drift-corrected ft(6)] -- see ur5station/prepare_datasets_bottle.py.
 TCP_POSE_SLICE = slice(0, 6)
 FT_SLICE = slice(6, 12)
 
