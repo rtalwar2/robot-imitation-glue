@@ -47,6 +47,7 @@ from open_bottle_agent import (  # noqa: E402
     LEFT_TRANSIT_JOINT_SPEED,
     RETREAT_SPEED,
     RIGHT_JOINT_SPEED,
+    RIGHT_NEUTRAL_JOINTS,
     log_plan_to_rerun,
     plan_opening_motion,
 )
@@ -376,6 +377,13 @@ def collect_data_bottle_opening(env, dataset_recorder, frequency=10, bottle_pose
 
             print(f"\n=== pose {pose_index + 1}/{len(bottle_poses)} (episode {dataset_recorder.n_recorded_episodes}) ===")
             input("Press Enter to move the RIGHT arm to the next bottle pose (Ctrl+C to abort)...")
+            # Via the neutral pose first, so the right arm always reaches a bottle pose from the same
+            # configuration rather than swinging directly between two arbitrary sampled poses.
+            # is_tcp_pose_reachable only checks per-waypoint IK, never the path between waypoints, so
+            # a direct pose-to-pose move can sweep through the other arm or the table even though both
+            # endpoints are individually fine.
+            print("[move] ur_right to the neutral pose")
+            env.move_right_to_joint_configuration(RIGHT_NEUTRAL_JOINTS, joint_speed=RIGHT_JOINT_SPEED)
             env.move_right_to_tcp_pose(tcp_right_pose, joint_speed=RIGHT_JOINT_SPEED)
 
             cap_pose = env.get_bottle_cap_pose()

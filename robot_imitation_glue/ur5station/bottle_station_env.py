@@ -52,6 +52,9 @@ class BottleStation(UR5eStation):
     def move_right_to_tcp_pose(self, pose, joint_speed=0.2):
         self.robot_right.move_to_tcp_pose(pose, joint_speed=joint_speed).wait()
 
+    def move_right_to_joint_configuration(self, joint_configuration, joint_speed=0.2):
+        self.robot_right.move_to_joint_configuration(joint_configuration, joint_speed=joint_speed).wait()
+
     def is_bottle_pose_reachable(self, cap_pose):
         """Whether the left arm can hover above and fully execute the opening motion for this
         cap pose (checked against a ring of hypothetical touch points -- the real touch point

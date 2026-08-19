@@ -75,8 +75,8 @@ MAX_SAMPLE_ATTEMPTS = 2000  # give up on generation after this many rejected sam
 
 # constraint parameters for the sampled bottle poses
 MAX_TILT_DEG = 30.0  # max angle between the cap normal and vertical (90+ would be sideways/upside down)
-CAP_POSITION_MIN = np.array([0.35, -0.15, 0.30])  # cap-center sampling box, ur_left base frame -- TUNE to your workspace
-CAP_POSITION_MAX = np.array([0.50, 0.05, 0.45])
+CAP_POSITION_MIN = np.array([0.30, -0.15, 0.30])  # cap-center sampling box, ur_left base frame -- TUNE to your workspace
+CAP_POSITION_MAX = np.array([0.50, 0.15, 0.45])
 
 # the right gripper must point generally toward ur_left, never backwards: max angle
 # between ur_right's TCP z-axis (the gripper's pointing direction) and the right-to-left
@@ -90,6 +90,17 @@ BOTTLE_RIM_RADIUS = 0.04  # metres, roughly where on the cap the touch point sit
 N_TOUCH_ANGLE_SAMPLES = 8
 
 LEFT_HOME_JOINTS = [ 0.06980903 ,-0.46889468, -1.61281288 ,-1.67641511 , 1.54615736 , 0]
+
+# Neutral via-pose for ur_right, passed through before every move to a sampled bottle pose so the
+# arm always approaches from the same configuration instead of swinging directly between two
+# arbitrary poses. Stored as joints rather than a TCP pose on purpose: IK could otherwise pick a
+# different elbow/wrist branch and land in the very configuration the via-point exists to avoid.
+# The corresponding TCP pose in ur_right's base frame, for reference:
+#   [[-0.158  0.023 -0.987 -0.591]
+#    [-0.987  0.01   0.158 -0.045]
+#    [ 0.014  1.     0.021  0.305]
+#    [ 0.     0.     0.     1.   ]]
+RIGHT_NEUTRAL_JOINTS = [-0.177, -1.799, 2.27, -0.494, 1.555, 0.017]
 RIGHT_JOINT_SPEED = 0.2  # rad/s for ur_right's pose-to-pose moves
 LEFT_TRANSIT_JOINT_SPEED = 0.2  # rad/s for ur_left's home <-> hover transits
 RETREAT_SPEED = 0.03  # m/s for lifting off the cap after the motion
