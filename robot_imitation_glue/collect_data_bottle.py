@@ -39,7 +39,6 @@ if _BOTTLE_EXPERIMENT_PATH not in sys.path:
     sys.path.insert(0, _BOTTLE_EXPERIMENT_PATH)
 
 from calibrate_and_hover_bottle import (  # noqa: E402
-    HOVER_HEIGHT_METERS,
     compute_hover_pose_above_bottle,
     tcp_left_to_camera,
 )
@@ -52,7 +51,6 @@ from open_bottle_agent import (  # noqa: E402
     plan_opening_motion,
 )
 from open_bottle_demo import (  # noqa: E402
-    APPROACH_OFFSET,
     LEGS,
     pixel_to_point_on_cap_plane,
     save_touch_point_sample,
@@ -435,14 +433,16 @@ def collect_data_bottle_opening(env, dataset_recorder, frequency=10, bottle_pose
                 env, dataset_recorder, plan, cap_normal, control_period
             )
 
-            # retreat: lift off the cap along its normal (recorded), then transit back home (not recorded -- a reset, not demonstration behaviour)
-            lift_pose = env.get_robot_pose_se3().copy()
-            lift_pose[:3, 3] = lift_pose[:3, 3] + (HOVER_HEIGHT_METERS - APPROACH_OFFSET) * cap_normal
-            print("[move] lifting off the cap")
+            # retreat: return to the hover pose above the cap centre (recorded), then transit back
+            # home (not recorded -- a reset, not demonstration behaviour). Ending at the hover pose
+            # rather than rising straight up from wherever leg 6 finished gives every demonstration
+            # the same terminal state relative to the bottle, instead of one that varies with which
+            # leg the motion ended on and how far the retries pushed it.
+            print("[move] returning to the hover pose above the cap")
             servo_to_waypoint(
-                env, dataset_recorder, lift_pose, control_period,
+                env, dataset_recorder, hover_pose.copy(), control_period,
                 max_translation_step=RETREAT_SPEED * control_period,
-                label="lifting off the cap",
+                label="returning to hover above the cap",
             )
 
             print("[move] retreating ur_left home")
