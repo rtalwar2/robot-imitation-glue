@@ -99,10 +99,31 @@ The iterative N-finding loop. Everything trains on the **100% level of what exis
    lerobot-train --config_path=robot_imitation_glue/ur5station/bottle/configs/bottle_from_scratch_100.json
    ```
 
-2. Evaluate with **20 real rollouts** on training-distribution conditions.
-   *(The bottle eval entrypoint is NOT yet written — model it on
-   `robot_imitation_glue/ur5station/eval_diffusion_lerobot_auto_u5.py`, minus the button detector,
-   and pass `n_env_action_dims=9` to `LerobotAgent`.)*
+2. Evaluate with **20 real rollouts** on training-distribution conditions (ID stickers):
+
+   ```bash
+   python -m robot_imitation_glue.ur5station.bottle.eval_bottle \
+       --checkpoint outputs/train/bottle/from_scratch_100/checkpoints/100000/pretrained_model \
+       --condition id --n-rollouts 20 --timeout-seconds 65
+   ```
+
+   **The rollout timeout is 2× the median demonstration duration** (protocol §1.8). Measured on
+   the current 51 episodes: median 311 frames @ 10 Hz = 31.1 s → **65 s** (the script's default).
+   **Re-derive it whenever N changes** — after collecting more episodes, recompute and pass the
+   new value explicitly:
+
+   ```bash
+   python - <<'PY'
+   import numpy as np, pyarrow.parquet as pq
+   from pathlib import Path
+   lengths = [l for f in sorted(Path("datasets/bottle_experiment/prepared/bottle_9d_100/meta/episodes").glob("*/*.parquet"))
+              for l in pq.read_table(f).column("length").to_pylist()]
+   print(f"median {np.median(lengths)/10:.1f}s -> --timeout-seconds {2*np.median(lengths)/10:.0f}")
+   PY
+   ```
+
+   Use the **same value for every arm and every condition** — the timeout is part of the success
+   criterion, so a config evaluated with a different timeout is not comparable.
 
 3. Decide:
 
@@ -179,10 +200,28 @@ others 9; design_a logs `initialized N encoder(s) from ...` for exactly the pass
 
 ## 8. Rollouts
 
-20 per config — **10 ID + 10 OOD (unseen stickers)** — 16 configs = 320 rollouts. Same eval
-entrypoint for every arm, `n_env_action_dims=9` for all (a no-op except design_c). Record per
-rollout: config, pose index, appearance condition, ID/OOD, success (cap sensor), and keep the
-rollout recordings.
+20 per config — **10 ID + 10 OOD (unseen stickers)** — 16 configs = 320 rollouts. One command per
+(checkpoint, condition); put the ID stickers on, run `--condition id`, swap to the OOD set, run
+`--condition ood`:
+
+```bash
+for arm in from_scratch generic design_a design_c; do for level in 100 75 50 25; do
+  python -m robot_imitation_glue.ur5station.bottle.eval_bottle \
+      --checkpoint outputs/train/bottle/${arm}_${level}/checkpoints/100000/pretrained_model \
+      --condition id --n-rollouts 10 --timeout-seconds 65
+done; done
+# swap stickers to the held-out appearance set, then the same loop with --condition ood
+```
+
+The same `--timeout-seconds` for **every** config and condition (see step 4 for the derivation —
+65 s at the current N; re-derive if N changed). The script uses the same eval path for every arm
+(`n_env_action_dims=9`, a no-op except for design_c), draws poses from the test split's seeded
+distribution (only appearance distinguishes ID from OOD — never the poses), scores success as all
+three cap channels sustained above threshold for 0.5 s, records every rollout — failures included —
+to `datasets/bottle_experiment/eval/`, and appends one row per rollout to
+`outputs/eval/bottle_results.json`. It resumes: re-running the same command tops up to
+`--n-rollouts`. Safety: a rollout aborts (scored as failure) if any drift-corrected force axis
+exceeds 40 N.
 
 ## 9. Decide the mechanism
 

@@ -58,6 +58,8 @@ Data levels 100/75/50/25% of N successful episodes (nested, fixed-seed shuffled)
 | `ur5station/bottle/screen_instrumentation.py` | privilege gate (mandatory) + per-modality suitability (§1.4) |
 | `ur5station/bottle/train_ast_bottle.py` | design-A audio pretraining (fork of `train_ast_single.py`, which stays button-only) |
 | `ur5station/bottle/generate_configs.py` | the 16 configs + parity assertion; emits into `bottle/configs/` |
+| `ur5station/bottle/eval_bottle.py` | rollout entrypoint: seeded eval poses, 65 s timeout (2× median demo), sustained-sensor success, records every rollout + results JSON |
+| `ur5station/bottle/splits.py` | the split definitions (seeds, counts, blacklists), shared by collection and eval |
 | `ur5station/bottle/repair/` | one-off dataset-repair scripts from past incidents (runbook: `docs/repairing_broken_lerobot_datasets.md`) |
 | `agents/lerobot_agent.py` | `n_env_action_dims=9` slice for design C (pass for all arms) |
 
@@ -65,6 +67,6 @@ Fork changes live in the `lerobot` submodule at `dd8ad224`: the AST position-emb
 
 ## Current state and what comes next
 
-Follow `Bottle_Operator_Guide.md` — it is the runbook, with exact commands and the decision rules for each stage. As of late August 2026: the train split has been collected once (51 successful episodes, after one crash-recovery documented in `docs/repairing_broken_lerobot_datasets.md`), the 8 prepared datasets exist, screening has run once (proprio 0.182 — gate passed; image 0.787; audio 0.606; FT 0.096 — preliminary table in the protocol), and 100%-level pretraining checkpoints exist. Still ahead: the §1.6 baseline-threshold check (does from-scratch@100% reach 90%, or collect more), per-level pretraining for the remaining levels, the 16 runs, the bottle **eval entrypoint (not yet written)**, and 320 rollouts.
+Follow `Bottle_Operator_Guide.md` — it is the runbook, with exact commands and the decision rules for each stage. As of late August 2026: the train split has been collected once (51 successful episodes, after one crash-recovery documented in `docs/repairing_broken_lerobot_datasets.md`), the 8 prepared datasets exist, screening has run once (proprio 0.182 — gate passed; image 0.787; audio 0.606; FT 0.096 — preliminary table in the protocol), and 100%-level pretraining checkpoints exist. Still ahead: the §1.6 baseline-threshold check (does from-scratch@100% reach 90%, or collect more), per-level pretraining for the remaining levels, the 16 runs, and 320 rollouts via `ur5station/bottle/eval_bottle.py`.
 
 Open issues that can bite: the payload-compensation check (§1.7 FT note), the sensor re-cover assumption behind the checkpoint scheme (Part 2, Task 1 warning), and the spectrogram being AV1-compressed before the AST sees it (§4.8, open — also the reason audio paths force `video_backend="pyav"`).
