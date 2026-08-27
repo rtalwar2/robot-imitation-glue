@@ -42,7 +42,7 @@ if __name__ == "__main__":
         use_internal_ft=True,
     )
 
-    dataset_name = "bottle_opening_test_1"
+    dataset_name = "bottle_opening_train"
 
     input("are you ready?")
 

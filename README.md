@@ -89,3 +89,13 @@ robot_imitation_glue > ur5station > eval_diffusion_lerobot.py
 hf upload ramen-noodels/test_5_episodes ./datasets/test_5_episodes --repo-type=dataset
 
 hf download ramen-noodels/test_5_episodes --repo-type dataset --local-dir datasets/test_5_episodes
+
+
+
+
+
+## Bottle experiment
+
+The full runbook — collection, dataset prep, screening, pretraining, config generation, training,
+rollouts, with exact commands and decision rules — is `experimental_design/Bottle_Operator_Guide.md`.
+All bottle tooling lives under `robot_imitation_glue/ur5station/bottle/`.

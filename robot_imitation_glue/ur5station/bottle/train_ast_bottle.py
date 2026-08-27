@@ -19,7 +19,7 @@ each one exists for a reason:
    audio differently than this pretraining did.
 
 Usage:
-    python -m robot_imitation_glue.ur5station.train_ast_bottle \\
+    python -m robot_imitation_glue.ur5station.bottle.train_ast_bottle \\
         --dataset-root datasets/bottle_experiment/prepared/bottle_9d_100 \\
         --output outputs/pretrain/bottle_audio_100.pt
 """
@@ -56,7 +56,7 @@ SENSOR_KEY = "bottle_sensor"
 # motion changes.
 CALIBRATED_RANGE = ((2.96, 3.25), (2.48, 3.29), (2.08, 3.25))
 
-VALIDATION_FRACTION = 0.2
+VALIDATION_FRACTION = 0.1
 
 
 def normalize_sensor(readings: np.ndarray) -> np.ndarray:

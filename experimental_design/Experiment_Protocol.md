@@ -9,11 +9,11 @@
 
 | Script | Does |
 |---|---|
-| `ur5station/collect_data_bottle_opening.py` | collection entrypoint — wrist camera, audio, cap sensor, per-split pose seeds |
-| `ur5station/prepare_datasets_bottle.py` | the 8 prepared datasets: {9,12}-dim action × 4 data levels |
-| `ur5station/screen_instrumentation.py` | privilege gate + per-modality suitability (§1.4) |
-| `ur5station/train_ast_bottle.py` | design-A audio pretraining (forked from `train_ast_single.py`, which is unchanged) |
-| `ur5station/lerobot_train/bottle/generate_configs.py` | the 16 training configs, with a build-time arm-parity assertion |
+| `ur5station/bottle/collect_data_bottle_opening.py` | collection entrypoint — wrist camera, audio, cap sensor, per-split pose seeds |
+| `ur5station/bottle/prepare_datasets_bottle.py` | the 8 prepared datasets: {9,12}-dim action × 4 data levels |
+| `ur5station/bottle/screen_instrumentation.py` | privilege gate + per-modality suitability (§1.4) |
+| `ur5station/bottle/train_ast_bottle.py` | design-A audio pretraining (forked from `train_ast_single.py`, which is unchanged) |
+| `ur5station/bottle/generate_configs.py` | the 16 training configs, with a build-time arm-parity assertion |
 | `agents/lerobot_agent.py` | `n_env_action_dims` — slices design C's auxiliary channels off before the robot |
 
 Fork changes live in `lerobot` at `dd8ad224`: the AST position-embedding fix (§4.7) and the `rgb_encoder_init_checkpoint` / `audio_encoder_init_checkpoint` fields. Design C needs no fork change at all.
@@ -273,16 +273,25 @@ The raw `ft` and the per-episode `ft_bias` are both recorded; the subtraction ha
 
 ### Screening
 
-- [ ] **Privilege test** (mandatory). Proprioception MLP → 3-channel sensor. Expect it to fail the gate (cap rotation depends on grip slip and thread engagement, not just wrist angle) — but confirm it, because a scripted motion makes proprioception unusually informative.
-- [ ] **Modality suitability** (mandatory here — design A needs it to pick which encoder to pretrain). Wrist image, audio (AST), FT. Record all scores and fix the threshold *before* looking at them.
-- [ ] Both tests run from `ur5station/screen_instrumentation.py`, which builds the *policy's own* encoder classes from the arm's config, so the resulting weights load into the policy with `strict=True` and no key remapping. Audio pretraining for design A proper is `ur5station/train_ast_bottle.py`.
+- [x] **Privilege test** (mandatory). Proprioception MLP → 3-channel sensor. Expect it to fail the gate (cap rotation depends on grip slip and thread engagement, not just wrist angle) — but confirm it, because a scripted motion makes proprioception unusually informative. Run once (see table below): a moderate positive signal, neither a clean pass nor a clean fail against any fixed threshold.
+- [x] **Modality suitability** (mandatory here — design A needs it to pick which encoder to pretrain). Wrist image, audio (AST), FT. Record all scores and fix the threshold *before* looking at them. All three run once (see table below).
+- [x] Both tests run from `ur5station/bottle/screen_instrumentation.py`, which builds the *policy's own* encoder classes from the arm's config, so the resulting weights load into the policy with `strict=True` and no key remapping. Audio pretraining for design A proper is `ur5station/bottle/train_ast_bottle.py`.
+
+**Preliminary results** (`datasets/bottle_experiment/prepared/bottle_9d_100`, 51 episodes, one run each, 10 epochs, R² against a mean-predictor on held-out validation). One run per modality so far — to be extended with more runs/seeds before this is load-bearing for anything.
+
+| Modality | r2_mean | S0 | S1 | S2 | Notes |
+|---|---|---|---|---|---|
+| Proprioception (privilege gate) | 0.182 | 0.146 | 0.227 | 0.172 | Above the R²=0 floor, well short of "near-perfect" |
+| Image (wrist camera) | 0.787 | 0.918 | 0.852 | 0.592 | Clearly the strongest of the four |
+| Audio (AST spectrogram) | 0.606 | 0.666 | 0.675 | 0.476 | Second-strongest. Getting here needed a fix: the first attempts crashed identically (`RuntimeError: Could not push packet to decoder`) decoding the small (128×298) `spectogram_values` AV1 stream, reproducible at both `num_workers=4` and `num_workers=1` — so not a cross-worker race, but torchcodec breaking in any forked worker process. Video confirmed not corrupted (a full sequential ffmpeg decode and a single-process frame-by-frame torchcodec decode of all 16,405 frames both passed cleanly). Fixed by setting `video_backend="pyav"` for the audio case only (`screen_instrumentation.py`), keeping `num_workers=4`. |
+| FT (internal force-torque) | 0.096 | 0.085 | 0.067 | 0.135 | Weakest, close to the mean-predictor floor |
 
 ### Training and the mechanism comparison
 
-- [x] ~~Confirm design C needs no collection-code change.~~ **Confirmed and implemented.** `ur5station/prepare_datasets_bottle.py` emits a 12-dim `action` = `[action(9), bottle_sensor(3)]`; lerobot reads the denoised width from `config.action_feature.shape[0]`, so the U-Net, sampling prior and MIN_MAX normalizer all widen with no policy change. Verified: both widths build, train and sample, +10,755 params (0.004%).
+- [x] ~~Confirm design C needs no collection-code change.~~ **Confirmed and implemented.** `ur5station/bottle/prepare_datasets_bottle.py` emits a 12-dim `action` = `[action(9), bottle_sensor(3)]`; lerobot reads the denoised width from `config.action_feature.shape[0]`, so the U-Net, sampling prior and MIN_MAX normalizer all widen with no policy change. Verified: both widths build, train and sample, +10,755 params (0.004%).
 - [x] ~~Add the inference slice.~~ **Done** — `LerobotAgent(n_env_action_dims=9)` truncates after the postprocessor. Pass `9` for **all four arms** (a no-op for three of them) so the eval path is byte-identical across arms.
 - [ ] Build the 8 prepared datasets (`prepare_datasets_bottle.py`) once collection and success-filtering are complete.
-- [ ] Generate the 16 configs (`lerobot_train/bottle/generate_configs.py`) — it asserts at build time that the arms differ only in intended keys. Requires the real `audio_norm_mean/std` from pretraining; it has no safe default.
+- [ ] Generate the 16 configs (`bottle/generate_configs.py`) — it asserts at build time that the arms differ only in intended keys, at every level. `audio_norm_mean/std` are **per level**: the random-init arms read that level's `audio_stats.json` (written by `prepare_datasets_bottle`, computed over exactly the episodes the level trains on) and design_a reads that level's pretraining checkpoint — a single global value would leak the 100% run's statistics into the smaller levels, invisibly to the arm comparison but squarely into the data-efficiency claim. Design_a is generated with an explicit `--design-a-modalities` (the operator's pre-registered call from the screening scores): a modality that did **not** pass the filter keeps the *generic* initialization and its matched normalization inside design_a, so arm 3 stays "arm 2 + instrumentation exactly where the signal is perceivable". The generator refuses missing or cross-level checkpoints.
 - [ ] Train 4 arms × 4 data levels = 16 runs, 100K steps each, final checkpoint.
 - [ ] 16 configs × 20 rollouts = **320 rollouts** for the pilot.
 - [ ] Decide the mechanism from Table 2, then carry the winner forward.

@@ -324,7 +324,7 @@ def run_opening_motion_with_retry(env, dataset_recorder, plan, cap_normal, contr
     return reached_pose, False
 
 
-def collect_data_bottle_opening(env, dataset_recorder, frequency=10, bottle_poses=None, n_episodes=None):
+def collect_data_bottle_opening(env, dataset_recorder, frequency=10, bottle_poses=None, n_episodes=None, pose_indices=None):
     """Collect `n_episodes` successful demonstrations, one per generated bottle pose by default.
 
     Defaults to len(bottle_poses), so each pose is used exactly once when nothing fails. Failed
@@ -335,10 +335,21 @@ def collect_data_bottle_opening(env, dataset_recorder, frequency=10, bottle_pose
     Counting successful episodes in the dataset (rather than loop iterations) makes this resumable:
     the recorder picks up n_recorded_episodes from an existing dataset, so a re-run tops up to the
     target instead of starting over.
+
+    pose_indices: optional explicit list of indices into bottle_poses to run, in order, instead of
+    the normal `n_recorded_episodes % len(bottle_poses)` cycling -- one successful episode per
+    entry. For targeted recovery of specific known-missing episodes (e.g. re-collecting poses that
+    were lost to a crash), where the poses to run don't correspond to the resumed dataset's
+    existing episode count. n_episodes is ignored when this is set: the target is always
+    `n_recorded_episodes at start + len(pose_indices)`.
     """
     if not bottle_poses:
         raise ValueError("bottle_poses is empty -- generate reachable poses first")
-    target_episodes = len(bottle_poses) if n_episodes is None else n_episodes
+    if pose_indices is not None:
+        target_episodes = dataset_recorder.n_recorded_episodes + len(pose_indices)
+    else:
+        target_episodes = len(bottle_poses) if n_episodes is None else n_episodes
+    recovery_cursor = 0
 
     rr.init("robot_imitation_glue_bottle")
     rr.spawn(memory_limit="10GB")
@@ -371,7 +382,9 @@ def collect_data_bottle_opening(env, dataset_recorder, frequency=10, bottle_pose
             env.capture_ft_bias()
             log_idle_to_rerun(env, dataset_recorder, "at home -- FT bias captured")
 
-            pose_index = dataset_recorder.n_recorded_episodes % len(bottle_poses)
+            pose_index = pose_indices[recovery_cursor] if pose_indices is not None else (
+                dataset_recorder.n_recorded_episodes % len(bottle_poses)
+            )
             rr.set_time("pose", sequence=dataset_recorder.n_recorded_episodes)
             tcp_right_pose, _planned_cap_pose = bottle_poses[pose_index]
 
@@ -463,6 +476,8 @@ def collect_data_bottle_opening(env, dataset_recorder, frequency=10, bottle_pose
             if episode_success:
                 dataset_recorder.save_episode()
                 print(f"[episode] saved (episode {dataset_recorder.n_recorded_episodes - 1})")
+                if pose_indices is not None:
+                    recovery_cursor += 1
                 if event.quit or dataset_recorder.n_recorded_episodes >= target_episodes:
                     break  # done -- no point asking the operator to reset for an episode that won't run
                 log_idle_to_rerun(env, dataset_recorder, "episode saved -- close the bottle by hand")
@@ -475,8 +490,8 @@ def collect_data_bottle_opening(env, dataset_recorder, frequency=10, bottle_pose
                 )
                 if event.quit:
                     break
-                # n_recorded_episodes didn't change, so the next loop iteration retries this same
-                # pose -- every generated pose ends up with exactly one successful recorded demo.
+                # recovery_cursor/n_recorded_episodes didn't change, so the next loop iteration
+                # retries this same pose -- every pose ends up with exactly one successful demo.
                 input("Close the cap again and rotate it a bit, then press Enter to retry this pose...")
     finally:
         listener.stop()

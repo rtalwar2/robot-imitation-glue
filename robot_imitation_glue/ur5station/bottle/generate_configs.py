@@ -15,21 +15,42 @@ What each arm is:
 design_c differs only by its dataset: lerobot reads the denoised width from the dataset's `action`
 feature, so pointing it at the 12-dim prepared dataset is the whole mechanism.
 
+Two rules this generator enforces, both of which an earlier version got wrong:
+
+**Audio normalization is per LEVEL, never global.** `audio_norm_mean/std` for the random-init arms
+come from that level's own `audio_stats.json` (written by prepare_datasets_bottle over exactly the
+episodes the level trains on), and for design_a from that level's own pretraining checkpoint. A
+single global value -- e.g. the 100% pretraining run's stats reused at 25% -- hands a run statistics
+from episodes it never sees. Because every arm at a level would share the leaked value, the arm
+comparison would look clean while the data-efficiency claim (the paper's headline) is contaminated.
+
+**design_a initializes only the modalities that passed the suitability filter** (--design-a-modalities,
+the operator's pre-registered call from the screening scores). A modality that did NOT pass keeps the
+GENERIC initialization and its matched normalization, so design_a stays "generic + instrumentation
+where the signal is perceivable" -- per modality, arm 2 nested inside arm 3. Unconditionally pointing
+both encoders at checkpoints would either crash on a missing file or silently pretend an unsuitable
+modality was pretrained.
+
 Normalization is matched to whatever each encoder was last trained under, which is why it is an
-intended difference rather than a parity violation: `generic` gets ImageNet/AudioSet stats because
-that is what its weights expect, while `design_a`'s encoder last saw data during instrumentation
-pretraining on this dataset, so it gets dataset stats like the random-init arms.
+intended difference rather than a parity violation: ImageNet/AudioSet stats for generic weights,
+that level's dataset stats for random-init and instrumentation-pretrained encoders.
 
 Usage:
-    python -m robot_imitation_glue.ur5station.lerobot_train.bottle.generate_configs \\
-        --audio-norm-mean <from pretraining> --audio-norm-std <from pretraining> \\
-        --design-a-checkpoint-dir outputs/pretrain
+    # before design-A pretraining exists (needs audio_stats.json from prepare_datasets_bottle):
+    python -m robot_imitation_glue.ur5station.bottle.generate_configs \\
+        --arms from_scratch,generic,design_c
+
+    # once the per-level checkpoints exist in --pretrain-dir:
+    python -m robot_imitation_glue.ur5station.bottle.generate_configs \\
+        --arms design_a --design-a-modalities image,audio --pretrain-dir outputs/pretrain
 """
 
 import argparse
 import copy
 import json
 from pathlib import Path
+
+import torch
 
 DATA_LEVELS = ("100", "75", "50", "25")
 ARMS = ("from_scratch", "generic", "design_a", "design_c")
@@ -46,6 +67,7 @@ AUDIOSET_NORM_STD = 4.5689974
 INTENDED_ARM_DIFFERENCES = {
     "job_name",
     "output_dir",
+    "policy.repo_id",
     "dataset.repo_id",
     "dataset.root",
     "dataset.use_imagenet_stats",
@@ -57,6 +79,44 @@ INTENDED_ARM_DIFFERENCES = {
     "policy.audio_encoder_init_checkpoint",
     "policy.output_features",  # documentation only; make_policy overwrites it from the dataset
 }
+
+
+def load_level_audio_stats(level: str) -> dict:
+    """That level's spectrogram mean/std/time_dimension, from prepare_datasets_bottle's stats pass.
+
+    Computed over exactly the episodes the level trains on -- see the leakage note in the module
+    docstring. The 9d and 12d datasets of a level carry identical copies; read the 9d one.
+    """
+    path = Path(DATASET_ROOT) / f"bottle_9d_{level}" / "audio_stats.json"
+    if not path.exists():
+        raise FileNotFoundError(
+            f"{path} not found -- run `python -m robot_imitation_glue.ur5station.bottle."
+            f"prepare_datasets_bottle --stats-only` first (per-level audio stats are required; "
+            "a global value would leak across data levels)"
+        )
+    return json.loads(path.read_text())
+
+
+def load_pretrain_checkpoint_meta(pretrain_dir: Path, modality: str, level: str) -> dict:
+    """The recorded metadata of a design-A pretraining checkpoint, verified against the level.
+
+    The checkpoint records which dataset it was trained on; a level mismatch means someone pointed
+    level 25 at the 100% checkpoint, which is exactly the cross-level leak this generator refuses.
+    """
+    path = pretrain_dir / f"bottle_{'rgb' if modality == 'image' else 'audio'}_{level}.pt"
+    if not path.exists():
+        raise FileNotFoundError(
+            f"{path} not found -- pretrain the {modality} encoder on bottle_9d_{level} first, or "
+            f"drop '{modality}' from --design-a-modalities"
+        )
+    payload = torch.load(path, map_location="cpu", weights_only=False)
+    recorded_root = str(payload.get("dataset_root", ""))
+    if f"_{level}" not in Path(recorded_root).name:
+        raise ValueError(
+            f"{path} records dataset_root={recorded_root!r}, which does not look like level {level} "
+            "-- a checkpoint pretrained on another level would leak that level's data into this one"
+        )
+    return {"path": str(path), **{k: payload[k] for k in payload if k != "encoder_state_dict"}}
 
 
 def base_config(audio_norm_mean: float, audio_norm_std: float, time_dimension: int, steps: int) -> dict:
@@ -90,7 +150,10 @@ def base_config(audio_norm_mean: float, audio_norm_std: float, time_dimension: i
         "resume": False,
         "seed": 2025,
         "num_workers": 8,
-        "batch_size": 64,
+        # 64 OOM'd on a 24GB card: unfrozen AST (audio_norm_mean/std pretraining, then
+        # end-to-end finetuning) plus the resnet18 RGB encoder plus the diffusion U-Net
+        # (down_dims up to 2048) all trained together left no headroom.
+        "batch_size": 32,
         "steps": steps,
         "eval_freq": 0,
         "log_freq": 200,
@@ -140,7 +203,12 @@ def base_config(audio_norm_mean: float, audio_norm_std: float, time_dimension: i
             },
             "vision_backbone": "resnet18",
             "resize_shape": None,
-            "crop_ratio": None,
+            # DiffusionConfig types this as a plain `float`, not `float | None` (unlike
+            # resize_shape/crop_shape) -- draccus rejects null for it. Unused anyway: it only
+            # takes effect when resize_shape is set, and this config crops directly via
+            # crop_shape with resize_shape left None, so 1.0 (the dataclass default, meaning
+            # "no additional ratio-derived cropping") is the correct no-op value here.
+            "crop_ratio": 1.0,
             "crop_shape": [216, 288],
             "crop_is_random": True,
             "pretrained_backbone_weights": None,
@@ -191,7 +259,13 @@ def base_config(audio_norm_mean: float, audio_norm_std: float, time_dimension: i
     }
 
 
-def apply_arm(config: dict, arm: str, level: str, checkpoint_dir: Path | None) -> dict:
+def apply_arm(
+    config: dict,
+    arm: str,
+    level: str,
+    pretrain_dir: Path | None = None,
+    design_a_modalities: tuple[str, ...] = (),
+) -> dict:
     config = copy.deepcopy(config)
     action_dims = 12 if arm == "design_c" else 9
     dataset_name = f"bottle_{action_dims}d_{level}"
@@ -201,6 +275,9 @@ def apply_arm(config: dict, arm: str, level: str, checkpoint_dir: Path | None) -
     config["policy"]["output_features"]["action"]["shape"] = [action_dims]
     config["job_name"] = f"bottle_{arm}_{level}"
     config["output_dir"] = f"outputs/train/bottle/{arm}_{level}"
+    # PreTrainedConfig.push_to_hub defaults to True and then requires repo_id -- same HF
+    # namespace as the button experiment's checkpoints (ramen-noodels/red_round_button_*).
+    config["policy"]["repo_id"] = f"ramen-noodels/bottle_{arm}_{level}"
 
     if arm == "generic":
         config["policy"]["pretrained_backbone_weights"] = IMAGENET_RESNET18
@@ -211,12 +288,38 @@ def apply_arm(config: dict, arm: str, level: str, checkpoint_dir: Path | None) -
         config["policy"]["audio_norm_std"] = AUDIOSET_NORM_STD
 
     if arm == "design_a":
-        if checkpoint_dir is None:
-            raise ValueError("--design-a-checkpoint-dir is required to emit the design_a configs")
-        # The checkpoint already holds ImageNet-derived, instrumentation-finetuned weights, so
-        # pretrained_backbone_weights stays None -- torchvision's would just be overwritten.
-        config["policy"]["rgb_encoder_init_checkpoint"] = str(checkpoint_dir / f"bottle_rgb_{level}.pt")
-        config["policy"]["audio_encoder_init_checkpoint"] = str(checkpoint_dir / f"bottle_audio_{level}.pt")
+        if pretrain_dir is None or not design_a_modalities:
+            raise ValueError(
+                "design_a needs --pretrain-dir and --design-a-modalities (the modalities that "
+                "passed the pre-registered suitability threshold)"
+            )
+        # Per modality: passed the filter -> that level's instrumentation checkpoint, normalization
+        # matched to what the pretraining used. Did NOT pass -> the GENERIC init and ITS matched
+        # normalization, so design_a stays arm 2 + instrumentation exactly where the signal is
+        # perceivable, and nowhere else.
+        if "image" in design_a_modalities:
+            meta = load_pretrain_checkpoint_meta(pretrain_dir, "image", level)
+            # pretrained_backbone_weights stays None: the checkpoint already holds the
+            # ImageNet-derived, instrumentation-finetuned weights, torchvision's would be overwritten.
+            config["policy"]["rgb_encoder_init_checkpoint"] = meta["path"]
+        else:
+            config["policy"]["pretrained_backbone_weights"] = IMAGENET_RESNET18
+            config["dataset"]["use_imagenet_stats"] = True
+        if "audio" in design_a_modalities:
+            meta = load_pretrain_checkpoint_meta(pretrain_dir, "audio", level)
+            config["policy"]["audio_encoder_init_checkpoint"] = meta["path"]
+            # The stats the encoder was actually finetuned under, recorded in the checkpoint.
+            config["policy"]["audio_norm_mean"] = float(meta["audio_norm_mean"])
+            config["policy"]["audio_norm_std"] = float(meta["audio_norm_std"])
+            if int(meta["time_dimension"]) != int(config["policy"]["time_dimension"]):
+                raise ValueError(
+                    f"audio checkpoint time_dimension={meta['time_dimension']} != dataset "
+                    f"time_dimension={config['policy']['time_dimension']} at level {level}"
+                )
+        else:
+            config["policy"]["pretrained_audio_weights"] = True
+            config["policy"]["audio_norm_mean"] = AUDIOSET_NORM_MEAN
+            config["policy"]["audio_norm_std"] = AUDIOSET_NORM_STD
 
     return config
 
@@ -251,34 +354,60 @@ def _assert_arms_differ_only_in(configs: dict[str, dict], allowed: set[str]) -> 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--audio-norm-mean",
-        type=float,
-        required=True,
-        help="spectrogram mean over the training split, printed by train_ast_bottle.py. The config "
-        "default is 0.0, which means NO normalization -- this must be set explicitly.",
+        "--arms",
+        default=",".join(ARMS),
+        help="comma-separated subset of arms to generate. Lets the non-design_a configs exist "
+        "before the per-level pretraining checkpoints do.",
     )
-    parser.add_argument("--audio-norm-std", type=float, required=True)
-    parser.add_argument("--time-dimension", type=int, default=298)
+    parser.add_argument(
+        "--design-a-modalities",
+        default=None,
+        help="comma-separated subset of {image,audio} that passed the pre-registered suitability "
+        "threshold. Required when generating design_a. A modality not listed keeps the GENERIC "
+        "initialization inside design_a.",
+    )
+    parser.add_argument("--pretrain-dir", type=Path, default=None, help="dir with bottle_{rgb,audio}_{level}.pt")
     parser.add_argument("--steps", type=int, default=100_000)
-    parser.add_argument("--design-a-checkpoint-dir", type=Path, default=None)
-    parser.add_argument("--output-dir", type=Path, default=Path(__file__).parent)
+    parser.add_argument("--output-dir", type=Path, default=Path(__file__).parent / "configs")
     args = parser.parse_args()
 
-    base = base_config(args.audio_norm_mean, args.audio_norm_std, args.time_dimension, args.steps)
+    arms = tuple(a.strip() for a in args.arms.split(",") if a.strip())
+    unknown = set(arms) - set(ARMS)
+    if unknown:
+        raise SystemExit(f"unknown arms {sorted(unknown)}; choose from {ARMS}")
+    modalities = tuple(m.strip() for m in (args.design_a_modalities or "").split(",") if m.strip())
+    if set(modalities) - {"image", "audio"}:
+        raise SystemExit("--design-a-modalities entries must be from {image,audio}")
+    if "design_a" in arms and not modalities:
+        raise SystemExit(
+            "generating design_a requires --design-a-modalities: state which modalities passed the "
+            "suitability filter (this is the operator's pre-registered call, not a default)"
+        )
 
-    # Check parity on one level; the level only changes the dataset path.
-    _assert_arms_differ_only_in(
-        {arm: apply_arm(base, arm, "100", args.design_a_checkpoint_dir) for arm in ARMS},
-        INTENDED_ARM_DIFFERENCES,
-    )
+    # Build EVERYTHING before writing ANYTHING: a missing checkpoint at level 75 must not leave a
+    # freshly written level-100 config behind, or a partial (and easily stale) set gets trained.
+    to_write = {}
+    for level in DATA_LEVELS:
+        # Per-LEVEL base: audio normalization comes from that level's own episodes. One base for
+        # all arms at a level, so the parity check below compares like with like.
+        stats = load_level_audio_stats(level)
+        base = base_config(stats["audio_norm_mean"], stats["audio_norm_std"], stats["time_dimension"], args.steps)
+
+        # Parity check at every level, always against from_scratch as the reference -- it needs
+        # nothing but the stats file, so it is constructible even when only design_a is requested.
+        built = {
+            arm: apply_arm(base, arm, level, args.pretrain_dir, modalities)
+            for arm in dict.fromkeys(("from_scratch", *arms))
+        }
+        _assert_arms_differ_only_in(built, INTENDED_ARM_DIFFERENCES)
+        for arm in arms:
+            to_write[f"bottle_{arm}_{level}.json"] = built[arm]
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    for arm in ARMS:
-        for level in DATA_LEVELS:
-            config = apply_arm(base, arm, level, args.design_a_checkpoint_dir)
-            path = args.output_dir / f"bottle_{arm}_{level}.json"
-            path.write_text(json.dumps(config, indent=2))
-            print(f"wrote {path}")
+    for name, config in to_write.items():
+        path = args.output_dir / name
+        path.write_text(json.dumps(config, indent=2))
+        print(f"wrote {path}")
 
 
 if __name__ == "__main__":

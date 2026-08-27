@@ -23,6 +23,7 @@ on, and it sidesteps a lerobot bug: `EpisodeAwareSampler` emits absolute frame i
 silently trains on the wrong frames.
 """
 
+import argparse
 import json
 from pathlib import Path
 
@@ -32,8 +33,8 @@ from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
 from robot_imitation_glue.lerobot_dataset.transform_dataset import transform_dataset
 
-RAW_ROOT = Path("datasets/bottle_experiment/expert/bottle_opening_train")
-OUTPUT_ROOT = Path("datasets/bottle_experiment/prepared")
+RAW_ROOT = Path("/home/rtalwar/robot-imitation-glue/datasets/bottle_experiment/expert/bottle_opening_train")
+OUTPUT_ROOT = Path("/home/rtalwar/robot-imitation-glue/datasets/bottle_experiment/prepared")
 OUTPUT_PREFIX = "bottle"
 
 # Fraction of the successful episodes each level trains on. Subsets are nested, so the 25% set is a
@@ -162,6 +163,77 @@ def nested_level_subsets(episodes: list[int], seed: int) -> dict[str, list[int]]
     return subsets
 
 
+def _episode_spectrogram_moments(raw_dataset: LeRobotDataset, episodes: list[int]) -> dict[int, tuple]:
+    """Per-episode (n, sum, sum_of_squares, time_dimension) of the spectrogram, one decode pass.
+
+    Computed per episode so the per-LEVEL statistics combine from these without re-decoding: the
+    levels are nested subsets of the same episodes, and the spectrogram lives in an AV1 video
+    stream whose decode dominates the cost of this whole script.
+    """
+    moments = {}
+    for episode_index in episodes:
+        bounds = raw_dataset.meta.episodes[episode_index]
+        count, total, total_squared, time_dimension = 0, 0.0, 0.0, None
+        for frame_index in range(bounds["dataset_from_index"], bounds["dataset_to_index"]):
+            values = np.asarray(raw_dataset[frame_index]["spectogram_values"], dtype=np.float64)
+            if values.ndim == 3:  # stored as a 3-channel video with the signal repeated per channel
+                values = values[0]
+            time_dimension = values.shape[0]
+            count += values.size
+            total += values.sum()
+            total_squared += (values**2).sum()
+        moments[episode_index] = (count, total, total_squared, time_dimension)
+        print(f"  episode {episode_index}: {count} spectrogram values")
+    return moments
+
+
+def write_audio_stats(raw_root: Path, output_root: Path) -> None:
+    """Per-LEVEL spectrogram mean/std, written as audio_stats.json into every prepared dataset root.
+
+    Exists to prevent a normalization leak: `audio_norm_mean/std` in the training configs must be
+    computed from the episodes that level actually trains on. Using one global value (e.g. from the
+    100% pretraining run) would hand the 25% run statistics from episodes it never sees -- and since
+    all arms at a level share these values, the leak would be invisible in the arm comparison while
+    quietly contaminating the data-efficiency claim, which is the paper's headline.
+
+    Stats are over each level's WHOLE subset (policy training has no validation split, so the subset
+    is exactly the training data). The 9d and 12d variants of a level share identical audio, so they
+    receive identical files. Reads the RAW dataset -- one decode pass total, per-episode moments
+    combined per level -- with the pyav backend, since torchcodec crashes decoding the small AV1
+    spectrogram stream inside worker processes and is fragile on it generally.
+    """
+    manifest = json.loads((output_root / "episode_order.json").read_text())
+    raw_dataset = LeRobotDataset(repo_id=None, root=str(raw_root), video_backend="pyav")
+
+    all_needed = sorted({e for episodes in manifest["levels"].values() for e in episodes})
+    print(f"computing spectrogram moments for {len(all_needed)} episodes (one decode pass)...")
+    moments = _episode_spectrogram_moments(raw_dataset, all_needed)
+
+    for level, episodes in manifest["levels"].items():
+        count = sum(moments[e][0] for e in episodes)
+        total = sum(moments[e][1] for e in episodes)
+        total_squared = sum(moments[e][2] for e in episodes)
+        time_dimensions = {moments[e][3] for e in episodes}
+        assert len(time_dimensions) == 1, f"inconsistent spectrogram time dimension: {time_dimensions}"
+
+        mean = total / count
+        std = float(np.sqrt(max(total_squared / count - mean**2, 1e-12)))
+        stats = {
+            "audio_norm_mean": float(mean),
+            "audio_norm_std": std,
+            "time_dimension": int(time_dimensions.pop()),
+            "n_frames_worth": count,
+            "episodes": episodes,
+            "raw_root": str(raw_root),
+        }
+        for action_dims in (N_ACTION_DIMS, N_ACTION_DIMS + N_SENSOR_CHANNELS):
+            root = output_root / f"{OUTPUT_PREFIX}_{action_dims}d_{level}"
+            if not root.exists():
+                raise FileNotFoundError(f"{root} does not exist -- run the full prepare first")
+            (root / "audio_stats.json").write_text(json.dumps(stats, indent=2))
+        print(f"level {level}: mean={mean:.6f} std={std:.6f} over {len(episodes)} episodes")
+
+
 def prepare(raw_root: Path, output_root: Path) -> None:
     raw_dataset = LeRobotDataset(repo_id=None, root=str(raw_root))
     all_episodes = list(range(raw_dataset.meta.total_episodes))
@@ -198,6 +270,8 @@ def prepare(raw_root: Path, output_root: Path) -> None:
             )
             verify(output_root / name, action_dims, len(episodes))
 
+    write_audio_stats(raw_root, output_root)
+
 
 def verify(root: Path, action_dims: int, expected_episodes: int) -> None:
     """Catch the failure modes that would otherwise only surface as a confusing training run."""
@@ -222,4 +296,16 @@ def verify(root: Path, action_dims: int, expected_episodes: int) -> None:
 
 
 if __name__ == "__main__":
-    prepare(RAW_ROOT, OUTPUT_ROOT)
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--stats-only",
+        action="store_true",
+        help="only (re)compute audio_stats.json for already-prepared datasets, without rebuilding "
+        "them -- rebuilding re-encodes all video, so use this to retrofit stats onto an existing "
+        "prepare run",
+    )
+    args = parser.parse_args()
+    if args.stats_only:
+        write_audio_stats(RAW_ROOT, OUTPUT_ROOT)
+    else:
+        prepare(RAW_ROOT, OUTPUT_ROOT)

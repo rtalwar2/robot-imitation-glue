@@ -5,6 +5,7 @@ This file orients AI agents working on the instrumented-imitation-learning exper
 | File | Status |
 |---|---|
 | `Experiment_Protocol.md` | **Authoritative.** Part 1 = shared methodology, Part 2 = per-task checklists, Part 3 = open promotor items, Part 4 = code issues (FIXED = committed) |
+| `Bottle_Operator_Guide.md` | The runbook: exact commands in order, decision rules, failure lookup |
 | `Task_Specifications.md` | Superseded (8 July 2026). Kept as history; do not follow it |
 | `session.json` | Transcript of the original design conversation with a local assistant |
 | `Promotor_Meeting_Report.pdf`, `Promotor_Meeting_Decison_map.svg` | Materials from the 1 July 2026 promotor meeting |
@@ -38,6 +39,8 @@ Data levels 100/75/50/25% of N successful episodes (nested, fixed-seed shuffled)
 
 1. **Arms differ only in intended keys.** `generate_configs.py` asserts this at build time (`INTENDED_ARM_DIFFERENCES`). Never hand-edit a generated config; change the generator.
 2. **Input normalization is matched to encoder initialization** (per-arm, deliberate): `generic` gets ImageNet/AudioSet stats; the others get dataset stats. `audio_norm_mean/std` default to 0/1 = *no normalization* — they must always be set explicitly. §1.7.
+2b. **Audio stats are per LEVEL, never global**: each level's configs use that level's `audio_stats.json` (random-init arms) or that level's pretraining checkpoint (design_a). Reusing the 100% run's stats at 25% leaks episodes the run never sees — invisible to the arm comparison, poison to the data-efficiency claim. Same rule for design-A checkpoints: one per level, trained on that level's dataset.
+2c. **design_a initializes only the modalities that passed the suitability filter** (`--design-a-modalities`); a modality below the bar keeps the generic init inside design_a, so arm 3 remains arm 2 + instrumentation exactly where the signal is perceivable.
 3. **`observation.state` is the only state key the policy reads** — anything the policy should see as proprioception must be concatenated into it. Other `observation.*` vectors are typed but never reach the conditioning.
 4. **`bottle_sensor` cannot leak into arms 1–3**: lerobot's `batch_to_transition` drops every key that is not `observation.*`/`action`/bookkeeping. For design C the signal must therefore live *inside* `action` (done at dataset-prep time).
 5. **Data-level subsets are separate prepared datasets**, never `dataset.episodes` lists — that field is broken for non-prefix lists (absolute vs. relative frame indices). Every prepared dataset is built from the raw root, one video generation each.
@@ -49,23 +52,19 @@ Data levels 100/75/50/25% of N successful episodes (nested, fixed-seed shuffled)
 
 | Script (under `robot_imitation_glue/`) | Does |
 |---|---|
-| `ur5station/collect_data_bottle_opening.py` | collection entrypoint (per-split pose seeds, pose blacklist) |
+| `ur5station/bottle/collect_data_bottle_opening.py` | collection entrypoint (per-split pose seeds, pose blacklist) |
 | `collect_data_bottle.py` | the collection loop: servo recording, checkpoint retries, FT-bias capture, rerun view, stop-at-target |
-| `ur5station/prepare_datasets_bottle.py` | the 8 prepared datasets ({9,12}-dim action × 4 levels), success filtering, FT drift subtraction |
-| `ur5station/screen_instrumentation.py` | privilege gate (mandatory) + per-modality suitability (§1.4) |
-| `ur5station/train_ast_bottle.py` | design-A audio pretraining (fork of `train_ast_single.py`, which stays button-only) |
-| `ur5station/lerobot_train/bottle/generate_configs.py` | the 16 configs + parity assertion |
+| `ur5station/bottle/prepare_datasets_bottle.py` | the 8 prepared datasets ({9,12}-dim action × 4 levels), success filtering, FT drift subtraction |
+| `ur5station/bottle/screen_instrumentation.py` | privilege gate (mandatory) + per-modality suitability (§1.4) |
+| `ur5station/bottle/train_ast_bottle.py` | design-A audio pretraining (fork of `train_ast_single.py`, which stays button-only) |
+| `ur5station/bottle/generate_configs.py` | the 16 configs + parity assertion; emits into `bottle/configs/` |
+| `ur5station/bottle/repair/` | one-off dataset-repair scripts from past incidents (runbook: `docs/repairing_broken_lerobot_datasets.md`) |
 | `agents/lerobot_agent.py` | `n_env_action_dims=9` slice for design C (pass for all arms) |
 
 Fork changes live in the `lerobot` submodule at `dd8ad224`: the AST position-embedding resize (§4.7 — `ignore_mismatched_sizes` was silently randomizing them) and the `rgb_encoder_init_checkpoint` / `audio_encoder_init_checkpoint` fields (strict load). Design C needs **no** fork change: lerobot derives the denoised width from the dataset's `action` feature.
 
 ## Current state and what comes next
 
-Tooling is committed; **no experiment data exists yet**. The order of work:
+Follow `Bottle_Operator_Guide.md` — it is the runbook, with exact commands and the decision rules for each stage. As of late August 2026: the train split has been collected once (51 successful episodes, after one crash-recovery documented in `docs/repairing_broken_lerobot_datasets.md`), the 8 prepared datasets exist, screening has run once (proprio 0.182 — gate passed; image 0.787; audio 0.606; FT 0.096 — preliminary table in the protocol), and 100%-level pretraining checkpoints exist. Still ahead: the §1.6 baseline-threshold check (does from-scratch@100% reach 90%, or collect more), per-level pretraining for the remaining levels, the 16 runs, the bottle **eval entrypoint (not yet written)**, and 320 rollouts.
 
-1. Collect (train/val/test splits, distinct seeds) — first verifying UR payload compensation for the FT baseline and the sticker conditions in Part 2, Task 1.
-2. Screening: privilege gate, then modality suitability (fix thresholds *before* looking).
-3. Design-A pretraining per data level → `audio_norm_mean/std` feed `generate_configs.py`.
-4. 16 training runs → 320 rollouts → mechanism decision (Table 2) → carry the winner to the remaining tasks (plugs, petri dish; wiping conditional on its force reformulation).
-
-Open issues that can bite: the payload-compensation check (§1.7 FT note), the sensor re-cover assumption behind the checkpoint scheme (Part 2, Task 1 warning), and the spectrogram being H.264-compressed before the AST sees it (§4.8, open).
+Open issues that can bite: the payload-compensation check (§1.7 FT note), the sensor re-cover assumption behind the checkpoint scheme (Part 2, Task 1 warning), and the spectrogram being AV1-compressed before the AST sees it (§4.8, open — also the reason audio paths force `video_backend="pyav"`).

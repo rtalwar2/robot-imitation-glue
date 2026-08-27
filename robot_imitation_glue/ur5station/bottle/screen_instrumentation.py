@@ -21,8 +21,8 @@ Scores are R2 against a mean-predictor, so 0 means "no better than always guessi
 Read each modality's score as how much it adds over the proprioception floor.
 
 Usage:
-    python -m robot_imitation_glue.ur5station.screen_instrumentation \\
-        --dataset-root datasets/bottle_experiment/prepared/bottle_9d_100 --input proprio
+    python -m robot_imitation_glue.ur5station.bottle.screen_instrumentation \\
+        --dataset-root datasets/bottle_experiment/prepared/bottle_9d_100 --input proprio --report 
 """
 
 import argparse
@@ -39,7 +39,7 @@ from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from lerobot.policies.diffusion.configuration_diffusion import DiffusionConfig
 from lerobot.policies.diffusion.modeling_diffusion import DiffusionAudioEncoder, DiffusionRgbEncoder
 
-from robot_imitation_glue.ur5station.train_ast_bottle import (
+from robot_imitation_glue.ur5station.bottle.train_ast_bottle import (
     CALIBRATED_RANGE,
     episode_split,
     normalize_sensor,
@@ -196,7 +196,14 @@ def main() -> None:
     device = "cuda" if torch.cuda.is_available() else "cpu"
     torch.manual_seed(args.seed)
 
-    dataset = LeRobotDataset(repo_id=None, root=str(args.dataset_root))
+    # torchcodec's AV1 decoder crashes on the small (128x298) spectogram_values stream as soon
+    # as it runs in any forked DataLoader worker process, at num_workers=4 AND at
+    # num_workers=1 alike (RuntimeError: Could not push packet to decoder) -- confirmed not a
+    # concurrency race between workers, and confirmed not corrupted data (a full sequential
+    # ffmpeg decode and a single-process frame-by-frame torchcodec decode both pass cleanly).
+    # pyav is the older, more conservative backend and doesn't hit this.
+    video_backend = "pyav" if args.input == "audio" else None
+    dataset = LeRobotDataset(repo_id=None, root=str(args.dataset_root), video_backend=video_backend)
     train_indices, validation_indices = episode_split(dataset, args.seed)
 
     audio_stats = (0.0, 1.0)
