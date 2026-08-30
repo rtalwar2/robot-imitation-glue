@@ -55,13 +55,13 @@ class MockEnv(BaseEnv):
             "gripper_state": gripper_state,
         }
 
-    def act(self, robot_pose_se3, gripper_opening, timestamp):
+    def act(self, robot_pose_se3, gripper_pose, timestamp):
         action = robot_pose_se3[:2, 3]
         # binarize action
         action = np.round(action).astype(np.int32)
         self.agent_pos = action
         self.agent_pos = np.clip(self.agent_pos, 0, self.grid_size - 1)
-        self.gripper_opening = gripper_opening
+        self.gripper_opening = gripper_pose
 
     def act_joints(self, robot_joints, gripper_pose, timestamp):
         self.agent_pos = np.clip(np.round(robot_joints).astype(np.int32), 0, self.grid_size - 1)
@@ -151,6 +151,6 @@ if __name__ == "__main__":
             break
         action = agent.get_action(observations)
         env_action, env_gripper = mock_agent_to_pose_converter(pose, env.get_gripper_opening(), action)
-        env.act(robot_pose_se3=env_action, gripper_opening=env_gripper, timestamp=0)
+        env.act(robot_pose_se3=env_action, gripper_pose=env_gripper, timestamp=0)
         pose = env_action
         time.sleep(0.1)
