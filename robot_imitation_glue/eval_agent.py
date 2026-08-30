@@ -6,6 +6,7 @@ import numpy as np
 import rerun as rr
 
 from lerobot.common.datasets.lerobot_dataset import LeRobotDataset
+from robot_imitation_glue.action_spaces import is_joint_action_type, resolve_action_type
 from robot_imitation_glue.base import BaseAgent, BaseDatasetRecorder, BaseEnv
 from robot_imitation_glue.utils import precise_wait
 
@@ -85,6 +86,8 @@ def eval(  # noqa: C901
     eval_dataset: LeRobotDataset = None,
     eval_dataset_image_key: str = "scene",
     env_observation_image_key: str = "scene",
+    policy_to_joints_converter=None,
+    teleop_to_joints_converter=None,
 ):
     """
     Evalulate a (policy) agent on a robot environment.
@@ -105,8 +108,22 @@ def eval(  # noqa: C901
         fps: frames per second for the dataset recorder
         eval_dataset: dataset to load initial scene image from
         eval_dataset_image_key: key in the dataset to load the image from
+        policy_to_joints_converter: function to convert policy action to an absolute joint configuration
+        teleop_to_joints_converter: function to convert teleop action to an absolute joint configuration
 
+    The action space of the env/agent pair (env.ACTION_SPEC.action_type) determines which converters are
+    used: the *_to_pose_converters with `env.act` for EEF actions, the *_to_joints_converters with
+    `env.act_joints` for joint actions. The joint converters receive the measured joint configuration of
+    the robot, joint targets are not integrated over time.
     """
+    action_type = resolve_action_type(env, teleop_agent, policy_agent)
+    is_joint_action = is_joint_action_type(action_type)
+
+    if is_joint_action:
+        assert (
+            policy_to_joints_converter is not None and teleop_to_joints_converter is not None
+        ), f"env/agents use {action_type.value} actions, so the joint converters have to be provided."
+
     state = State()
     event = Event()
     listener = init_keyboard_listener(event, state)
@@ -154,12 +171,18 @@ def eval(  # noqa: C901
         target_gripper_state = env.get_gripper_opening()
 
         logger.info("Start teleop")
-        logger.debug("moveL robot to current teleop pose")
-        # first move slowly to the initial pose of the teleop device
-        action = teleop_agent.get_action(env.get_observations())
-        robot_pose, gripper_state = teleop_to_pose_converter(target_pose, target_gripper_state, action)
-        env.move_robot_to_tcp_pose(robot_pose)
-        logger.debug("robot moved to teleop pose")
+        if is_joint_action:
+            # the env API only allows to move slowly to a TCP pose, not to a joint configuration, so we
+            # cannot approach the teleop configuration safely here. Joint teleop devices are usually
+            # kinematic twins (gello), so the operator can align them with the robot before starting.
+            logger.warning("joint-space teleop: make sure the teleop arm matches the robot configuration")
+        else:
+            logger.debug("moveL robot to current teleop pose")
+            # first move slowly to the initial pose of the teleop device
+            action = teleop_agent.get_action(env.get_observations())
+            robot_pose, gripper_state = teleop_to_pose_converter(target_pose, target_gripper_state, action)
+            env.move_robot_to_tcp_pose(robot_pose)
+            logger.debug("robot moved to teleop pose")
 
         while not state.rollout_active:
             cycle_end_time = time.time() + control_period
@@ -178,14 +201,26 @@ def eval(  # noqa: C901
             logger.debug(f"teleop action: {action}")
 
             # convert teleop action to env action
-            target_pose, target_gripper_state = teleop_to_pose_converter(target_pose, target_gripper_state, action)
-            logger.debug(f"robot_target_pose: {target_pose}")
+            if is_joint_action:
+                target_joints, target_gripper_state = teleop_to_joints_converter(
+                    env.get_joint_configuration(), env.get_gripper_opening(), action
+                )
+                logger.debug(f"robot_target_joints: {target_joints}")
 
-            env.act(
-                robot_pose_se3=target_pose,
-                gripper_pose=target_gripper_state,
-                timestamp=time.time() + control_period,
-            )
+                env.act_joints(
+                    robot_joints=target_joints,
+                    gripper_pose=target_gripper_state,
+                    timestamp=time.time() + control_period,
+                )
+            else:
+                target_pose, target_gripper_state = teleop_to_pose_converter(target_pose, target_gripper_state, action)
+                logger.debug(f"robot_target_pose: {target_pose}")
+
+                env.act(
+                    robot_pose_se3=target_pose,
+                    gripper_pose=target_gripper_state,
+                    timestamp=time.time() + control_period,
+                )
 
             if cycle_end_time > time.time():
                 precise_wait(cycle_end_time)
@@ -230,21 +265,35 @@ def eval(  # noqa: C901
             logger.debug(f"policy action: {action}")
 
             # convert  action to env action
-            new_robot_target_pose, new_target_gripper_state = policy_to_pose_converter(
-                target_pose, target_gripper_state, action
-            )
-            logger.debug(f"new_robot_target_pose: {new_robot_target_pose}")
-            logger.debug(f"current robot pose: {env.get_robot_pose_se3()}")
+            if is_joint_action:
+                new_robot_target_joints, new_target_gripper_state = policy_to_joints_converter(
+                    env.get_joint_configuration(), env.get_gripper_opening(), action
+                )
+                logger.debug(f"new_robot_target_joints: {new_robot_target_joints}")
+                logger.debug(f"current robot joints: {env.get_joint_configuration()}")
 
-            env.act(
-                robot_pose_se3=new_robot_target_pose,
-                gripper_pose=new_target_gripper_state,
-                timestamp=time.time() + control_period,
-            )
+                env.act_joints(
+                    robot_joints=new_robot_target_joints,
+                    gripper_pose=new_target_gripper_state,
+                    timestamp=time.time() + control_period,
+                )
+            else:
+                new_robot_target_pose, new_target_gripper_state = policy_to_pose_converter(
+                    target_pose, target_gripper_state, action
+                )
+                logger.debug(f"new_robot_target_pose: {new_robot_target_pose}")
+                logger.debug(f"current robot pose: {env.get_robot_pose_se3()}")
+
+                env.act(
+                    robot_pose_se3=new_robot_target_pose,
+                    gripper_pose=new_target_gripper_state,
+                    timestamp=time.time() + control_period,
+                )
 
             recorder.record_step(observations, action)
 
-            target_pose = new_robot_target_pose
+            if not is_joint_action:
+                target_pose = new_robot_target_pose
             target_gripper_state = new_target_gripper_state
 
             if cycle_end_time > time.time():
