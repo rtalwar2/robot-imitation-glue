@@ -8,11 +8,17 @@ an ``airo_teleop_agents.teleop_agent.TeleopAgent`` and exposes it as a robot-imi
 
 Installation
 ------------
-airo-teleop is not on PyPI, so install it from a clone into the same environment as robot-imitation-glue::
+airo-teleop is not on PyPI. It is vendored as a git submodule at ``airo-teleop/``, and its two packages
+(``airo-teleop-devices`` and ``airo-teleop-agents``) are wired up as editable path dependencies, behind an
+optional extra (see ``pyproject.toml`` for its name)::
 
-    git clone https://github.com/airo-ugent/airo-teleop.git
-    pip install -e airo-teleop/airo-teleop-devices -r airo-teleop/airo-teleop-devices/requirements.txt
-    pip install -e airo-teleop/airo-teleop-agents -r airo-teleop/airo-teleop-agents/requirements.txt
+    git clone --recurse-submodules <this repo>   # or: git submodule update --init --recursive
+    uv sync --extra <the airo-teleop extra>
+
+Without the submodule, installing a clone of airo-teleop manually into the same environment also works::
+
+    pip install -e <clone>/airo-teleop-devices -r <clone>/airo-teleop-devices/requirements.txt
+    pip install -e <clone>/airo-teleop-agents -r <clone>/airo-teleop-agents/requirements.txt
 
 The import of airo-teleop is lazy (see ``_import_teleop_agent_class``), so robot_imitation_glue keeps working
 without it installed; you only need it when you actually instantiate an airo-teleop agent.
