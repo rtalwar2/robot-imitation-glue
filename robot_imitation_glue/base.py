@@ -105,6 +105,18 @@ class BaseDatasetRecorder:
     def save_episode(self):
         raise NotImplementedError
 
+    def set_episode_success(self, success):
+        """Label every frame recorded so far in the current (unsaved) episode with this
+        outcome. Call once the episode's true outcome is known, right before save_episode()
+        -- outcomes are often only knowable in hindsight (e.g. a check-then-recover loop),
+        so passing `success` into record_step() per-step cannot label the frames where the
+        task actually completes."""
+        raise NotImplementedError
+
+    def delete_episode(self):
+        """discard the current (unsaved) episode."""
+        raise NotImplementedError
+
     def finish_recording(self):
         pass
 

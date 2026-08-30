@@ -19,6 +19,12 @@ class DummyDatasetRecorder(BaseDatasetRecorder):
     def save_episode(self):
         print("saving dataset episode")
 
+    def set_episode_success(self, success):
+        print("labeling dataset episode success:", success)
+
+    def delete_episode(self):
+        print("deleting dataset episode")
+
     @property
     def n_recorded_episodes(self):
         return 0
@@ -133,6 +139,23 @@ class LeRobotDatasetRecorder(BaseDatasetRecorder):
         for key in self.state_keys:
             frame[key] = torch.tensor(obs[key])
         self.lerobot_dataset.add_frame(frame)
+
+    def set_episode_success(self, success):
+        episode_buffer = self.lerobot_dataset.episode_buffer
+        if episode_buffer is None:
+            return
+        # add_frame() converts the torch tensors it is handed to numpy, so write numpy here too:
+        # every buffer entry then has the same type whether it was set live or patched in hindsight.
+        episode_buffer["next.success"] = [np.array([bool(success)])] * episode_buffer["size"]
+
+    def delete_episode(self):
+        if self.lerobot_dataset.episode_buffer is None:
+            return
+        # clear_episode_buffer() removes this episode's image dir but, unlike save_episode(), does not
+        # wait for the async image writer first, so drain it here to avoid racing the in-flight writes.
+        if self.lerobot_dataset.image_writer is not None:
+            self.lerobot_dataset.image_writer.wait_until_done()
+        self.lerobot_dataset.clear_episode_buffer()
 
     def save_episode(self):
         self.lerobot_dataset.save_episode()
