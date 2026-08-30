@@ -1,6 +1,10 @@
 import numpy as np
 
-from robot_imitation_glue.base import BaseAgent, BaseEnv
+from robot_imitation_glue.base import ActionSpec, ActionType, BaseAgent, BaseEnv
+
+
+class MockActionSpec(ActionSpec):
+    action_type = ActionType.ABS_EEF
 
 
 class MockEnv(BaseEnv):
@@ -8,13 +12,18 @@ class MockEnv(BaseEnv):
     a very simple mock environment where a 2D point is moved around in a grid.
 
     The environment has a fixed size and the agent can move in 4 directions: up, down, left, right.
+
+    The 'joint configuration' of this env is simply the 2D position of the point.
     """
+
+    ACTION_SPEC = MockActionSpec
 
     def __init__(self, grid_size=224):
         super().__init__()
         self.grid_size = grid_size
         self.agent_pos = np.array([0, 0], dtype=np.int32)
         self.target_pos = np.array([0, 0], dtype=np.int32)
+        self.gripper_opening = 0.0
 
     def reset(self):
         self.agent_pos = np.array([self.grid_size // 2, self.grid_size // 2], dtype=np.int32)
@@ -40,6 +49,14 @@ class MockEnv(BaseEnv):
         action = np.round(action).astype(np.int32)
         self.agent_pos = action
         self.agent_pos = np.clip(self.agent_pos, 0, self.grid_size - 1)
+        self.gripper_opening = gripper_opening
+
+    def act_joints(self, robot_joints, gripper_pose, timestamp):
+        self.agent_pos = np.clip(np.round(robot_joints).astype(np.int32), 0, self.grid_size - 1)
+        self.gripper_opening = gripper_pose
+
+    def get_joint_configuration(self):
+        return self.agent_pos.astype(np.float32)
 
     def get_robot_pose_se3(self):
         pose = np.eye(4)
@@ -47,13 +64,21 @@ class MockEnv(BaseEnv):
         return pose
 
     def get_gripper_opening(self):
-        return 0.0
+        return self.gripper_opening
+
+    def move_robot_to_tcp_pose(self, pose):
+        self.act(pose, self.gripper_opening, 0)
+
+    def move_gripper(self, width):
+        self.gripper_opening = width
 
 
 class MockAgent(BaseAgent):
     """
     a very simple mock agent that provides 2D translations using keyboard arrows
     """
+
+    ACTION_SPEC = MockActionSpec
 
     def __init__(self):
         super().__init__()
