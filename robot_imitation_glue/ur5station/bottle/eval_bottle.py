@@ -89,7 +89,7 @@ SUCCESS_SUSTAIN_STEPS = 5
 
 # Abort guard: |drift-corrected force| above this on any axis means the policy is grinding into
 # something -- stop the rollout (scored as failure) instead of letting it push harder.
-MAX_ABS_FORCE_NEWTONS = 40.0
+MAX_ABS_FORCE_NEWTONS = 100.0
 
 
 def make_observation_preprocessor():

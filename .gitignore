@@ -10,3 +10,4 @@ datasets/
 outputs/
 models/
 ast_delta_z/
+lid_touch_point_debug/
