@@ -147,18 +147,21 @@ point shares; §1.6 explains why the control is the right arm for the gate.
        --condition id --n-rollouts 20 --timeout-seconds 65
    ```
 
-   **The rollout timeout is 2× the median demonstration duration** (protocol §1.8). The current
-   65 s is **provisional** — derived from the old 51 episodes (median 311 frames @ 10 Hz = 31.1 s).
-   **Re-derive it on the recollected data** (and again whenever N changes), then pass the new value
-   explicitly everywhere:
+   **The rollout timeout is 2× the median demonstration duration, rounded up to the
+   next 5 s** (protocol §1.8). The current 65 s is **provisional** — derived from the old
+   51 episodes (median 311 frames @ 10 Hz = 31.1 s → 2×31.1 = 62.2 → 65). **Re-derive it on
+   the recollected data** (and again whenever N changes), then pass the new value explicitly
+   everywhere:
 
    ```bash
    python - <<'PY'
+   import math
    import numpy as np, pyarrow.parquet as pq
    from pathlib import Path
-   lengths = [l for f in sorted(Path("datasets/bottle_experiment/prepared/bottle_9d_100/meta/episodes").glob("*/*.parquet"))
-              for l in pq.read_table(f).column("length").to_pylist()]
-   print(f"median {np.median(lengths)/10:.1f}s -> --timeout-seconds {2*np.median(lengths)/10:.0f}")
+   lengths = [x for f in sorted(Path("datasets/bottle_experiment/prepared/bottle_9d_100/meta/episodes").glob("*/*.parquet"))
+              for x in pq.read_table(f).column("length").to_pylist()]
+   median_s = np.median(lengths) / 10
+   print(f"median {median_s:.1f}s -> --timeout-seconds {5 * math.ceil(2 * median_s / 5)}")
    PY
    ```
 
@@ -235,9 +238,11 @@ python -m robot_imitation_glue.ur5station.bottle.eval_bottle \
 Use the **same `--timeout-seconds` for every config and condition** (step 4's derivation —
 provisionally 65 s until the recollection lands).
 
-**What the operator does per rollout.** The script gates each stage with an Enter press: move the
-left arm home → move the right arm to the sampled pose → hover → **hand control to the policy**.
-There is **no sticker-confirmation prompt anymore** (removed 2026-10): the condition is whatever
+**What the operator does per rollout.** The script gates three stages with an Enter press — move
+the left arm home → move the right arm to the sampled pose → **hand control to the policy** (the
+hover move above the cap runs on its own between the second and third gates) — plus one
+"close the bottle by hand" press between rollouts. There is **no sticker-confirmation prompt
+anymore** (removed 2026-10): the condition is whatever
 `--condition` declares, so swapping the physical stickers between the ID and OOD loops is on the
 operator — a mislabeled batch is an operating error, not something the script catches.
 
@@ -249,15 +254,18 @@ for a visual verdict:
 ```
 
 Answer `y` when the cap is mostly open even though not all three sensor channels cleared — the
-operator's answer becomes the episode's `success` label, recorded with `success_source: "operator"`
-in both the eval dataset and `outputs/eval/bottle_results.json`. Sensor-decided rollouts carry
-`success_source: "sensors"`; the verdict path never overrides a sensor-determined outcome. Rows
-from before the change lack the field — treat absent as `"sensors"`.
+operator's answer becomes the episode's `success` label. It reaches the eval dataset as the
+recorded episode's `next.success`; the provenance lives in `outputs/eval/bottle_results.json`,
+where the row carries `success_source: "operator"` (sensor-determined rows carry
+`"sensors"` — the dataset itself has no source field, so audit provenance through the results
+JSON). The verdict path never overrides a sensor-determined outcome. Rows from before the change
+lack the field — treat absent as `"sensors"`.
 
 Under the hood, unchanged: the same eval path for every arm (`n_env_action_dims=9`, a no-op except
 for `generic_c`), poses drawn from the test split's seeded distribution (only appearance
-distinguishes ID from OOD — never the poses), sensor success = all three cap channels sustained
-above threshold for 5 consecutive steps (0.5 s), every rollout recorded — failures included — to
+distinguishes ID from OOD — never the poses), sensor success = all three cap channels sustained at
+or above threshold for 5 consecutive steps (0.5 s; `is_uncovered` compares with `>=`), every
+rollout recorded — failures included — to
 `datasets/bottle_experiment/eval/eval_bottle_{arm}_{level}_{condition}/`, one row appended per
 rollout to `outputs/eval/bottle_results.json`. It resumes: re-running the same command tops up to
 `--n-rollouts`. Safety: a rollout aborts (scored as failure) if any drift-corrected force axis
@@ -270,7 +278,7 @@ Fill the protocol's **Table 2** with the verification cell's 20 ID rollouts agai
 
 | Result | Decision |
 |---|---|
-| `from_scratch` ties or beats `generic` at 100% ID | promotes it to a live arm (and reports the finding: AudioSet init misfits contact audio); extend it to the other levels and its optional OOD block |
+| `from_scratch` ties or beats `generic` at 100% ID | promotes it to a live arm — a tie says the pretrained init the design leans on was never shown to help here, a win says AudioSet init actively misfits contact audio; generate its remaining levels and add it to the rollout budget |
 | loses | the pretrained-init assumption holds; the run goes to the appendix as the init-verification row. Do **not** resurrect it on a better-looking level or condition — the rule is one-sided by pre-registration |
 
 Then the analysis the pilot exists for (§1.9): **Figure A** — success rate vs. % data, ID only,
@@ -287,7 +295,7 @@ only.
 | `RepositoryNotFoundError ... datasets/None` on load | episode-count drift from a hard crash — `docs/repairing_broken_lerobot_datasets.md` |
 | `Could not push packet to decoder` in a DataLoader worker | torchcodec vs the AV1 spectrogram stream — audio paths use `video_backend="pyav"` (already handled in the bottle scripts) |
 | `audio_stats.json not found` from generate_configs | run step 2's `--stats-only` — the parity reference arm is built at every level, so every level's stats are required |
-| `parity check: arms differ in unintended keys` (AssertionError) | a change to the base config leaked into an arm-specific branch, or a new key was added on one side only — fix `apply_arm`; do not paper over it by extending `INTENDED_ARM_DIFFERENCES` unless the key is genuinely an intended arm difference |
+| `AssertionError: arms differ in unintended keys` from generate_configs | a change to the base config leaked into an arm-specific branch, or a new key was added on one side only — fix `apply_arm`; do not paper over it by extending `INTENDED_ARM_DIFFERENCES` unless the key is genuinely an intended arm difference |
 | every collected episode `success=False` | cap-sensor feed dead or thresholds stale — check `bottle_ble_reader.py`, re-derive `PER_CHANNEL_THRESHOLDS` (+ `CALIBRATED_RANGE`) per step 0 |
-| rollout ends as `manual_stop` you did not cause | a stray newline in the terminal buffer — the script flushes pending input before each rollout, but a second process writing to the tty would defeat it |
+| rollout ends as `manual_stop` you did not cause | a stray newline in the terminal buffer — the script flushes pending input before each rollout, but a second process writing to the tty would defeat it. A known residual gap: `input()` reads through Python's buffer, so a **double Enter at a stage gate** can leave the second newline unreachable to the kernel-level flush, and the verdict prompt would then auto-answer (empty answer = failure, so the mislabel is fail-safe but still wrong — answer deliberately after reading the prompt) |
 | collection loops forever on one pose | pose can't succeed — retry cap is unlimited by design; blacklist it **only** if it is a collection-feasibility problem, and write down why |

@@ -8,9 +8,11 @@ except where they are meant to differ; every shared value has exactly one defini
 
 What each arm is:
 
-    generic       CONTROL. ImageNet/AudioSet initialization -- the framework default everyone
-                  trains from (upstream lerobot's DiffusionPolicy ships `pretrained_backbone_weights
-                  = "ResNet18_Weights.IMAGENET1K_V1"`). Denoised vector = action(9).
+    generic       CONTROL. ImageNet/AudioSet initialization -- the practitioner standard (the
+                  original Diffusion Policy code initializes its ResNet-18 from ImageNet, and
+                  lerobot defaults ACT's backbone to `ResNet18_Weights.IMAGENET1K_V1`; its
+                  DiffusionPolicy dataclass defaults to None, so this repo's configs set it
+                  explicitly). Denoised vector = action(9).
     generic_c     TREATMENT. Identical to generic except the dataset's 12-dim action =
                   [action(9), instrumentation(3)]; lerobot derives the denoised width from the
                   dataset's `action` feature, so that single change IS the whole mechanism. The
@@ -22,9 +24,10 @@ What each arm is:
                   pretrained init is never worse than random on this task family (it is an
                   assumption worth checking: ManiWAV's audio ablation preferred from-scratch ASTs
                   on contact audio, though that comparison confounds architecture with init).
-                  Pre-registered one-sided rule: it is dropped from the design unless it ties or
-                  beats `generic` at 100% ID -- a loss (or parity) is reported as the appendix
-                  init-verification row, only a win promotes it to a live arm.
+                  Pre-registered one-sided rule: it is dropped (filed as the appendix
+                  init-verification row) only if it LOSES to `generic` at 100% ID -- a tie or a
+                  win promotes it to a live arm, since either means the pretrained init this
+                  design leans on was not shown to help.
 
 Why the matrix was simplified: the design-A (encoder pretraining) vs design-C (auxiliary
 prediction) mechanism comparison is retired -- the mechanism itself comes from the colleague's
@@ -82,7 +85,9 @@ INTENDED_ARM_DIFFERENCES = {
     "policy.pretrained_audio_weights",
     "policy.audio_norm_mean",
     "policy.audio_norm_std",
-    "policy.output_features",  # documentation only; make_policy overwrites it from the dataset
+    # Exact key, not the subtree: the whole `policy.output_features` prefix would also excuse an
+    # unintended `type` divergence. make_policy overwrites output_features from the dataset anyway.
+    "policy.output_features.action.shape",
 }
 
 
@@ -196,7 +201,7 @@ def base_config(audio_norm_mean: float, audio_norm_std: float, time_dimension: i
             "pretrained_backbone_weights": None,
             # false in every arm: the encoder raises if GroupNorm is combined with torchvision
             # pretrained weights, and flipping it for the generic arms alone would leave them the
-            # only ones using BatchNorm -- an architecture difference confounded with initialization.
+            # only ones using GroupNorm -- an architecture difference confounded with initialization.
             "use_group_norm": False,
             "spatial_softmax_num_keypoints": 32,
             "use_separate_rgb_encoder_per_camera": True,

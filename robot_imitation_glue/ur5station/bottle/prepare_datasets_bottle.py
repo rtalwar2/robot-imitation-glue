@@ -4,11 +4,12 @@ Separate from `prepare_datasets.py` (pour-cup-v2 joint/EEF remapping) and from
 `uR3station/prepare_datasets.py` (button experiment), following the same one-script-per-experiment
 pattern as those.
 
-Turns one raw recording into the 8 datasets the 4-arm x 4-data-level experiment needs:
-{9-dim action, 12-dim action} x {100, 75, 50, 25}% of the successful episodes.
+Turns one raw recording into the 8 datasets the two-arm x 4-data-level design needs:
+{9-dim action, 12-dim action} x {100, 75, 50, 25}% of the successful episodes. (The 9-dim sets
+serve both curve arms and the from_scratch verification cell; the 12-dim sets serve generic_c.)
 
-The 12-dim variant appends the 3-channel cap sensor to the action vector. That is all design C
-("predict the instrumentation alongside the action") requires: lerobot reads the denoised width from
+The 12-dim variant appends the 3-channel cap sensor to the action vector. That is all the
+treatment ("predict the instrumentation alongside the action") requires: lerobot reads the denoised width from
 `config.action_feature.shape[0]`, so the U-Net, the sampling prior and the MIN_MAX normalizer all
 widen on their own. The three extra channels take 3/12 of the denoising loss, and at inference
 `LerobotAgent(n_env_action_dims=9)` drops them again.
@@ -81,9 +82,9 @@ def _rename_features(features: dict) -> dict:
     # The fork's audio branch keys off exactly this name.
     features["observation.audio.spectogram_values"] = features.pop("spectogram_values")
 
-    # bottle_sensor is deliberately kept: the design A pretraining reads it as its target, and it can
-    # never leak into the policy because lerobot's `batch_to_transition` drops every key that is not
-    # observation.*, action, or bookkeeping.
+    # bottle_sensor is deliberately kept: screening (screen_instrumentation) and offline success
+    # re-labelling read it from the dataset. It can never leak into the policy because lerobot's
+    # `batch_to_transition` drops every key that is not observation.*, action, or bookkeeping.
     return features
 
 

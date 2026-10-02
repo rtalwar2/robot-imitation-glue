@@ -25,12 +25,19 @@ Rationale (design-A/B mechanism comparison retired; the reasoning lives in §1.1
   replication of the workshop mechanism, not the headline, and its cost was four extra trainings,
   per-level encoder pretraining, and a 160-rollout mechanism table.
 - **Pretrained init is the assumed starting point, and the assumption is checked, not trusted.**
-  Both arms use it because it is the framework default (upstream lerobot ships
-  `pretrained_backbone_weights = "ResNet18_Weights.IMAGENET1K_V1"`) — but a single from-scratch
-  run at 100% verifies it, because for *contact audio* the assumption is genuinely unproven
-  (ManiWAV preferred from-scratch ASTs on contact-rich audio, albeit confounded with architecture).
-  Pre-registered one-sided rule: the run is **dropped unless it ties or beats `generic` at 100% ID**;
-  a loss or parity is the appendix init-verification row; only a win promotes it to a live arm.
+  Both arms use it because it is the practitioner standard — the original Diffusion Policy code
+  initializes its ResNet-18 with ImageNet weights, and lerobot defaults ACT's backbone to
+  `ResNet18_Weights.IMAGENET1K_V1` (its DiffusionPolicy dataclass defaults to `None`, so this
+  repo's configs set it explicitly, as lerobot's own ACT configs do) — which makes the control as
+  strong as off-the-shelf practice without us tuning it. But a single from-scratch run at 100%
+  verifies the assumption, because for *contact audio* it is genuinely unproven (ManiWAV preferred
+  from-scratch ASTs on contact-rich audio, albeit confounded with architecture).
+  Pre-registered one-sided rule: `from_scratch` is **dropped from the design — reported as the
+  appendix init-verification row — only if it loses to `generic` at 100% ID** (strictly fewer
+  successes). A **tie or a win promotes it to a live third arm** (its remaining levels get
+  generated and it joins the curve budget): a tie means pretrained init was never shown to help
+  this task family, a win means it actively misfits contact audio — either is a finding in its own
+  right, since the whole design leans on that assumption.
 - **Rebaseline.** Demonstration collection is being redone and the cap-sensor
   covered/uncovered thresholds are being recalibrated. Every N, duration, percentile, and
   screening score in this protocol and the operator guide that was computed on the pre-revision
@@ -106,9 +113,9 @@ Two arms on every task — control and treatment — plus a verification cell th
 | **`generic_c`** | ImageNet / AudioSet | action + instrumentation | treatment; the *only* difference from the control is the auxiliary channels |
 | **`from_scratch`** | random | action only | init verification, pilot 100% level only; pre-registered one-sided rule, see below |
 
-**Why both arms start pretrained.** ImageNet/AudioSet initialization is the framework default — upstream lerobot's DiffusionPolicy ships `pretrained_backbone_weights = "ResNet18_Weights.IMAGENET1K_V1"` — so it is where any practitioner starts, and it makes the control as strong as free practice allows. It also collapses the design to a single manipulated factor: `generic` and `generic_c` share architecture, init, input normalization, hyperparameters, and step budget, differing only in the denoised width.
+**Why both arms start pretrained.** ImageNet/AudioSet initialization is the practitioner standard — the original Diffusion Policy code initializes its ResNet-18 with ImageNet weights, and lerobot defaults ACT's backbone to `ResNet18_Weights.IMAGENET1K_V1` (its DiffusionPolicy dataclass defaults to `None`; lerobot's own configs and this repo's pass it explicitly) — so it is where any practitioner starts, and it makes the control as strong as free practice allows. It also collapses the design to a single manipulated factor: `generic` and `generic_c` share architecture, init, input normalization, hyperparameters, and step budget, differing only in the denoised width.
 
-**Why the assumption is checked, not trusted.** For *contact audio* specifically, "pretrained is free and always better" is unproven: ManiWAV found a from-scratch AST beat AudioSet-based audio encoders on contact-rich tasks — though their comparison confounds architecture with initialization (scratch transformer vs AudioSet-pretrained CNN), which is exactly the confound this design's verification cell avoids: same AST, same everything else, only init differs. The pre-registered one-sided rule: `from_scratch` is trained and evaluated once at the pilot's 100% level, and **dropped unless it ties or beats `generic` at 100% ID**. Parity or a loss is reported as the appendix init-verification row; a win promotes random init to a live third arm because it would mean AudioSet init actively misfits contact audio, which is a finding in its own right.
+**Why the assumption is checked, not trusted.** For *contact audio* specifically, "pretrained is free and always better" is unproven: ManiWAV found a from-scratch AST beat AudioSet-based audio encoders on contact-rich tasks — though their comparison confounds architecture with initialization (scratch transformer vs AudioSet-pretrained CNN), which is exactly the confound this design's verification cell avoids: same AST, same everything else, only init differs. The pre-registered one-sided rule: `from_scratch` is trained and evaluated once at the pilot's 100% level, and **dropped — reported as the appendix init-verification row — only if it loses to `generic` at 100% ID**. A **tie or a win promotes random init to a live third arm** (remaining levels generated, full curve budget): a tie means the initialization the whole design leans on was never shown to help here; a win means AudioSet init actively misfits contact audio — each a finding in its own right.
 
 All encoders are fine-tuned during policy training in every variant. Same architecture, same hyperparameters, same step budget.
 
@@ -229,8 +236,8 @@ Framing for the paper: the two curve arms are *identical in every respect except
 
 - **40 real-world rollouts per curve configuration**: 20 in-distribution + 20 out-of-distribution. The `from_scratch` verification cell runs ID only (20) — its decision rule is an ID comparison; OOD for it is optional extension, never gate.
 - **Success rate** is the only metric. No secondary metrics.
-- Rollout timeout: 2× the median demonstration duration (**provisional at 65 s**; the median must be re-derived after the 2026-10 recollection — the guide's snippet recomputes it). The same timeout is used for every arm and condition; a config evaluated with a different timeout is not comparable.
-- A rollout ends on **sustained sensor success** (all channels above their thresholds for 5 consecutive steps), **timeout**, **force-abort** (any drift-corrected force axis beyond `MAX_ABS_FORCE_NEWTONS`), or an **operator Enter-stop**. An Enter-stopped rollout is scored by the operator's visual verdict — the episode's `next.success` and the results-row `success` take that answer, because a visibly-open cap whose third sensor channel never clears is a real success the sensors miss. Rows carry `success_source: "operator" | "sensors"`; the verdict never overrides a sensor-determined outcome. Every rollout end must be reported with its outcome class and source.
+- Rollout timeout: 2× the median demonstration duration, **rounded up to the next 5 s** (provisionally 62.2 → **65 s**; the median must be re-derived after the 2026-10 recollection — the guide's snippet recomputes it and applies the rounding). The same timeout is used for every arm and condition; a config evaluated with a different timeout is not comparable.
+- A rollout ends on **sustained sensor success** (all channels at or above their thresholds for 5 consecutive steps — `is_uncovered` uses `>=`), **timeout**, **force-abort** (any drift-corrected force axis beyond `MAX_ABS_FORCE_NEWTONS`), or an **operator Enter-stop**. An Enter-stopped rollout is scored by the operator's visual verdict — the episode's `next.success` and the results-row `success` take that answer, because a visibly-open cap whose third sensor channel never clears is a real success the sensors miss. The verdict's source is recorded in the results rows (`success_source: "operator" | "sensors"`; the eval dataset carries only the resulting `next.success`, not the source). The verdict never overrides a sensor-determined outcome. Every rollout end must be reported with its outcome class and source.
 - The ID/OOD condition is **declared by the operator's `--condition` flag, not verified by the script** (the confirmation prompt was removed 2026-10; the label is what the sticker state was at the operator's hand, and mislabeling is an operating error to avoid, not a check to automate).
 - OOD varies **only** the generalization axis. Every other condition — including the bottle-holding arm's pose distribution — is drawn from the training distribution, or an OOD failure cannot be attributed to the axis under test.
 
@@ -255,7 +262,7 @@ Two distinct claims from the same rollouts. Never conflate them:
 - **Figure A — data efficiency:** success rate vs. % training data, ID rollouts only, pooled across tasks, two curves (control, treatment).
 - **Figure B — generalization:** ID vs. OOD success at each data level, per arm.
 - **Table 1 — screening:** per task, the proprioception privilege-test score for every task attempted (including those that failed the gate), plus modality suitability scores wherever they were run — diagnostic on every task since 2026-10.
-- **Table 2 — init verification (pilot only):** `from_scratch` vs `generic` at 100% ID, with the pre-registered one-sided rule and the outcome it decided. Appendix material unless the cell won and became a live arm.
+- **Table 2 — init verification (pilot only):** `from_scratch` vs `generic` at 100% ID, with the pre-registered one-sided rule and the outcome it decided. Appendix material unless the cell tied or won and became a live arm.
 
 ---
 
@@ -335,7 +342,7 @@ The raw `ft` and the per-episode `ft_bias` are both recorded; the subtraction ha
 - [ ] Generate the 8 curve configs (`bottle/generate_configs.py`, default `--arms generic,generic_c`) — it asserts at build time that the arms differ only in intended keys, at every level. The verification cell is generated separately, deliberately narrowly: `--arms from_scratch --levels 100`. `audio_norm_mean/std` stay **per level** for the random-init cell (that level's `audio_stats.json`, written by `prepare_datasets_bottle`, computed over exactly the episodes the level trains on — a global value would leak the 100% run's statistics into smaller levels); the generic arms carry AudioSet's dataset-independent constants and have no leak surface. The design-A inputs (`--design-a-modalities`, `--pretrain-dir`) are gone with the arm.
 - [ ] Train 2 arms × 4 data levels = **8 curve runs**, plus the single `from_scratch`@100% verification run. 100K steps each, final checkpoint.
 - [ ] 8 curve configs × (20 ID + 20 OOD) + verification cell 20 ID = **340 rollouts** for the pilot (360 if the verification cell's optional OOD extension is run — it can never gate anything).
-- [ ] Apply the init-verification rule (Table 2): `from_scratch`@100% ID vs `generic`@100% ID — tie or win promotes it to a live arm, loss or parity files it as the appendix verification row. Then analyze the two-arm curves: Figure A (ID, pooled) and Figure B (ID vs OOD per arm).
+- [ ] Apply the init-verification rule (Table 2): `from_scratch`@100% ID vs `generic`@100% ID — a **loss** (strictly fewer successes) files it as the appendix verification row; a **tie or win** promotes it to a live arm (generate its remaining levels, add its curve). Then analyze the two-arm curves: Figure A (ID, pooled) and Figure B (ID vs OOD per arm).
 
 ## Task 2 — Rubber plug insertion
 
@@ -441,6 +448,6 @@ The same bug was in `train_ast_single.py:90` (with the same incorrect comment), 
 
 ### 4.8 The spectrogram is video-compressed before the AST sees it — open
 
-`spectogram_values` is a 3-D array, so `dataset_recorder.py:171-177` classifies it as a **video** feature. The mel spectrogram the AST consumes is therefore H.264-encoded and float-quantized to uint8 — lossy compression applied to one of the modalities under evaluation.
+`spectogram_values` is a 3-D array, so `dataset_recorder.py:171-177` classifies it as a **video** feature. The mel spectrogram the AST consumes is therefore AV1-encoded (confirmed: PyAV decodes the recorded stream with `libdav1d`) and float-quantized to uint8 — lossy compression applied to one of the modalities under evaluation.
 
 Pre-existing (the button experiment's results went through it too), so it was left alone rather than changed unilaterally, but it deserves a deliberate decision before the audio arms are taken seriously. The lossless option is storing the spectrogram flattened as a 1-D float32 vector, which makes it a state feature; that would need a small change to the fork's audio branch to reshape on the way in.

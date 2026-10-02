@@ -5,12 +5,12 @@ attaches to the run (the sticker set is a physical property of the bottle; there
 confirmation).
 
     python -m robot_imitation_glue.ur5station.bottle.eval_bottle \\
-        --checkpoint outputs/train/bottle/from_scratch_100/checkpoints/100000/pretrained_model \\
-        --condition id --n-rollouts 10
+        --checkpoint outputs/train/bottle/generic_100/checkpoints/100000/pretrained_model \\
+        --condition id --n-rollouts 20
 
 Identical eval path for every arm, by construction:
-  - `n_env_action_dims=9` is passed for all arms -- it slices design C's 3 auxiliary
-    instrumentation channels off the denoised vector and is a no-op for the 9-dim arms.
+  - `n_env_action_dims=9` is passed for all arms -- it slices the treatment arm's (generic_c)
+    3 auxiliary instrumentation channels off the denoised vector and is a no-op for the 9-dim arms.
   - The observation preprocessor mirrors `prepare_datasets_bottle` exactly: the policy must see at
     rollout time what it saw at training time. observation.state = [tcp_pose(6), ft - ft_bias(6)]
     with the FT bias captured at the home pose each episode, same as collection. (One inherent gap,
@@ -19,11 +19,13 @@ Identical eval path for every arm, by construction:
     Protocol §1.8: OOD varies only the appearance axis -- the pose distribution never changes
     between ID and OOD.
 
-Success: all three cap-sensor channels above their uncovered thresholds for
+Success: all three cap-sensor channels at or above their uncovered thresholds for
 SUCCESS_SUSTAIN_STEPS consecutive control steps. Sustained rather than instantaneous because
 run_0006 shows transient above-threshold excursions before the real transition; a single-step
 criterion could score a failed rollout as success. Timeout: protocol §1.8 says 2x the median
-demonstration duration -- measured 31.1 s over the 51 collected episodes, hence the 65 s default.
+demonstration duration rounded up to the next 5 s -- provisionally 2x31.1 s = 62.2 -> 65 s default
+(the 31.1 s was measured over the old 51-episode set, which is being recollected; re-derive it per
+the operator guide and pass --timeout-seconds explicitly).
 
 A rollout also ends when the operator presses Enter mid-rollout; the operator is then asked
 whether the cap visually opened, and that answer becomes the episode's success label
@@ -263,7 +265,8 @@ def main() -> None:
         "--timeout-seconds",
         type=float,
         default=65.0,
-        help="2x the median demonstration duration (measured 31.1s over the 51 collected episodes)",
+        help="2x the median demonstration duration, rounded up to the next 5 s (provisionally 65 s; "
+        "the 31.1s median predates the 2026-10 recollection -- re-derive and pass explicitly)",
     )
     parser.add_argument(
         "--results",
