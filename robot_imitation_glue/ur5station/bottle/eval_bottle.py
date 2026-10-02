@@ -1,8 +1,8 @@
 """Evaluate a trained bottle-opening policy with real rollouts.
 
-One command per (checkpoint, appearance condition): the sticker set is physical, so ID vs OOD is a
-thing the operator changes on the bottle and *declares* here -- the script records the declaration,
-it cannot verify it.
+One command per (checkpoint, appearance condition): --condition is just the label the operator
+attaches to the run (the sticker set is a physical property of the bottle; there is no startup
+confirmation).
 
     python -m robot_imitation_glue.ur5station.bottle.eval_bottle \\
         --checkpoint outputs/train/bottle/from_scratch_100/checkpoints/100000/pretrained_model \\
@@ -25,6 +25,12 @@ run_0006 shows transient above-threshold excursions before the real transition; 
 criterion could score a failed rollout as success. Timeout: protocol §1.8 says 2x the median
 demonstration duration -- measured 31.1 s over the 51 collected episodes, hence the 65 s default.
 
+A rollout also ends when the operator presses Enter mid-rollout; the operator is then asked
+whether the cap visually opened, and that answer becomes the episode's success label
+(success_source "operator"). Reason: a mostly-open bottle whose third sensor channel never
+clears is a real success the sensors miss. Sensor/timeout/force-abort endings keep the
+sensor-derived label (success_source "sensors").
+
 Every rollout is recorded (successes AND failures -- rollouts are evidence, unlike demonstrations)
 and a JSON results file accumulates one row per rollout for the analysis stage.
 """
@@ -32,7 +38,9 @@ and a JSON results file accumulates one row per rollout for the analysis stage.
 import argparse
 import datetime
 import json
+import select
 import sys
+import termios
 import time
 from pathlib import Path
 
@@ -92,6 +100,34 @@ SUCCESS_SUSTAIN_STEPS = 5
 MAX_ABS_FORCE_NEWTONS = 100.0
 
 
+def drain_pending_input() -> None:
+    """Discard keystrokes sitting unread in the terminal buffer (an Enter hammered through an
+    earlier gate, extra stops from one rollout). Every gate and every rollout start calls this
+    first, so one physical Enter advances exactly one prompt and a buffered newline can never
+    silently skip a gate or instantly stop the next rollout."""
+    if sys.stdin.isatty():
+        termios.tcflush(sys.stdin, termios.TCIFLUSH)
+
+
+def wait_for_enter(prompt: str) -> None:
+    drain_pending_input()
+    input(prompt)
+
+
+def poll_manual_stop() -> bool:
+    """Non-blocking check for an operator Enter press (the mid-rollout stop key): consumes the
+    line and returns True if one arrived since the last poll, otherwise returns immediately.
+    Polled once per control step, so the stop lands within one 0.1 s cycle. No-op when stdin
+    is not a terminal -- there is no operator on the other end of a pipe."""
+    if not sys.stdin.isatty():
+        return False
+    readable, _, _ = select.select([sys.stdin], [], [], 0)
+    if readable:
+        sys.stdin.readline()
+        return True
+    return False
+
+
 def make_observation_preprocessor():
     """Env observation dict -> the batched tensors the policy's own preprocessor expects.
 
@@ -142,8 +178,15 @@ def run_rollout(env, agent, recorder, timeout_seconds: float, label: str) -> dic
     started = time.time()
     steps = 0
 
+    drain_pending_input()
+
     for _ in range(max_steps):
         cycle_end = time.time() + control_period
+
+        if poll_manual_stop():
+            outcome = "manual_stop"
+            break
+
         obs = env.get_observations()
 
         if np.abs(corrected_force(obs)).max() > MAX_ABS_FORCE_NEWTONS:
@@ -177,6 +220,17 @@ def run_rollout(env, agent, recorder, timeout_seconds: float, label: str) -> dic
 
     duration = time.time() - started
     success = outcome == "success"
+    success_source = "sensors"
+
+    if outcome == "manual_stop":
+        print(f"[rollout] stopped by operator after {steps} steps ({duration:.1f}s)")
+        # The stop Enter is consumed by the poll; flush anything typed after it so the verdict
+        # prompt can't be answered by a stray keystroke.
+        drain_pending_input()
+        verdict = input("[rollout] did the cap VISUALLY open? (y = success, anything else = failure): ")
+        success = verdict.strip().lower() in ("y", "yes")
+        success_source = "operator"
+
     recorder.set_episode_success(success)
     recorder.save_episode()  # failures too: rollouts are evidence
 
@@ -185,6 +239,7 @@ def run_rollout(env, agent, recorder, timeout_seconds: float, label: str) -> dic
     return {
         "outcome": outcome,
         "success": success,
+        "success_source": success_source,
         "steps": steps,
         "duration_seconds": round(duration, 2),
         "final_sensor_reading": final_reading,
@@ -226,10 +281,6 @@ def main() -> None:
     eval_dataset_name = f"eval_bottle_{config_name}_{args.condition}"
 
     print(f"[eval] config={config_name} condition={args.condition} split={args.split} n={args.n_rollouts}")
-    input(
-        f"Confirm the bottle currently wears the {args.condition.upper()} appearance "
-        "(this is recorded as declared, it cannot be checked) -- Enter to continue..."
-    )
 
     schunk = SchunkGripperProcess(usb_interface="/dev/serial/by-path/pci-0000:00:14.0-usb-0:7:1.0-port0,11,115200,8E1")
     env = BottleStation(
@@ -274,14 +325,14 @@ def main() -> None:
     try:
         for rollout_index in range(already_done, args.n_rollouts):
             print(f"\n===== rollout {rollout_index + 1}/{args.n_rollouts} ({config_name}, {args.condition}) =====")
-            input("Press Enter to move the LEFT arm home (Ctrl+C to abort)...")
+            wait_for_enter("Press Enter to move the LEFT arm home (Ctrl+C to abort)...")
             env.robot.move_to_joint_configuration(LEFT_HOME_JOINTS, joint_speed=LEFT_TRANSIT_JOINT_SPEED).wait()
             # Same per-episode FT drift zeroing as collection: the policy trained on
             # drift-corrected FT, so it must see drift-corrected FT here.
             env.capture_ft_bias()
 
             tcp_right_pose, _planned_cap_pose = bottle_poses[rollout_index]
-            input("Press Enter to move the RIGHT arm to the rollout pose (Ctrl+C to abort)...")
+            wait_for_enter("Press Enter to move the RIGHT arm to the rollout pose (Ctrl+C to abort)...")
             print("[move] ur_right via the neutral pose")
             env.move_right_to_joint_configuration(RIGHT_NEUTRAL_JOINTS, joint_speed=RIGHT_JOINT_SPEED)
             env.move_right_to_tcp_pose(tcp_right_pose, joint_speed=RIGHT_JOINT_SPEED)
@@ -292,7 +343,7 @@ def main() -> None:
             print(f"[move] ur_left to hover above the cap at {np.round(hover_pose[:3, 3], 4)}")
             env.move_robot_to_tcp_pose(hover_pose, joint_speed=LEFT_TRANSIT_JOINT_SPEED)
 
-            input("Press Enter to hand control to the POLICY (Ctrl+C to abort)...")
+            wait_for_enter("Press Enter to hand control to the POLICY (Ctrl+C to abort)...")
             row = run_rollout(
                 env,
                 agent,
@@ -324,7 +375,7 @@ def main() -> None:
             args.results.write_text(json.dumps(existing, indent=2))
 
             if rollout_index + 1 < args.n_rollouts:
-                input("Close the bottle by hand, then press Enter for the next rollout...")
+                wait_for_enter("Close the bottle by hand, then press Enter for the next rollout...")
     finally:
         recorder.finish_recording()
         env.close()
