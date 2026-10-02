@@ -1,7 +1,7 @@
 {
   "dataset": {
-    "repo_id": "bottle_12d_75",
-    "root": "datasets/bottle_experiment/prepared/bottle_12d_75/",
+    "repo_id": "bottle_12d_50",
+    "root": "datasets/bottle_experiment/prepared/bottle_12d_50/",
     "episodes": null,
     "image_transforms": {
       "enable": true,
@@ -61,12 +61,12 @@
       }
     },
     "revision": null,
-    "use_imagenet_stats": false,
+    "use_imagenet_stats": true,
     "video_backend": "torchcodec"
   },
   "env": null,
-  "job_name": "bottle_design_c_75",
-  "output_dir": "outputs/train/bottle/design_c_75",
+  "job_name": "bottle_generic_c_50",
+  "output_dir": "outputs/train/bottle/generic_c_50",
   "resume": false,
   "seed": 2025,
   "num_workers": 8,
@@ -158,19 +158,19 @@
       288
     ],
     "crop_is_random": true,
-    "pretrained_backbone_weights": null,
+    "pretrained_backbone_weights": "ResNet18_Weights.IMAGENET1K_V1",
     "use_group_norm": false,
     "spatial_softmax_num_keypoints": 32,
     "use_separate_rgb_encoder_per_camera": true,
     "rgb_binary_backbone": null,
     "audio_backbone": "MIT/ast-finetuned-audioset-10-10-0.4593",
-    "audio_norm_mean": 0.6606318066095572,
-    "audio_norm_std": 0.06451220940048069,
+    "audio_norm_mean": -4.2677393,
+    "audio_norm_std": 4.5689974,
     "audio_feature_type": "embedding",
     "time_dimension": 298,
     "freeze_audio_encoder": false,
     "add_intermediate_audio_layer": false,
-    "pretrained_audio_weights": false,
+    "pretrained_audio_weights": true,
     "rgb_encoder_init_checkpoint": null,
     "audio_encoder_init_checkpoint": null,
     "down_dims": [
@@ -201,6 +201,6 @@
     "optimizer_weight_decay": 1e-06,
     "scheduler_name": "cosine",
     "scheduler_warmup_steps": 500,
-    "repo_id": "ramen-noodels/bottle_design_c_75"
+    "repo_id": "ramen-noodels/bottle_generic_c_50"
   }
 }

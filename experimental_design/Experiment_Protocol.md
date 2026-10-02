@@ -1,22 +1,59 @@
 # Instrumented Imitation Learning — Experiment Protocol
 
 **Status:** supersedes `Task_Specifications.md` (8 July 2026)
-**Date:** 12 August 2026
+**Date:** 12 August 2026 · **Revised:** 2 October 2026 on branch `ral_simplified` (see the revision block below)
 **Target:** RA-L
 **Structure:** Part 1 is the methodology shared by all tasks. Part 2 is a per-task checklist. Part 3 lists what still needs the promotor. Part 4 lists code issues found along the way — items marked **FIXED** are applied and committed; the rest are open.
 
-**Implementation** (committed; the pilot's tooling exists, the data does not yet):
+## Revision — 2 October 2026: simplified arm set (`ral_simplified`)
+
+The four-arm × four-level matrix (16 runs, 320+ rollouts) is replaced by a **two-arm × four-level
+curve plus a one-time initialization-verification cell**:
+
+| Arm | Role | Encoder init | Denoised vector |
+|---|---|---|---|
+| `generic` | **control** | ImageNet/AudioSet | action(9) |
+| `generic_c` | **treatment** | ImageNet/AudioSet | action(9) ⊕ instrumentation(3) |
+| `from_scratch` | init verification, 100% level only | random | action(9) |
+
+Rationale (design-A/B mechanism comparison retired; the reasoning lives in §1.1–§1.3):
+
+- **Single factor.** The workshop paper's C arm differed from its baselines in *two* things at
+  once — random init AND auxiliary channels. With both arms on the standard pretrained init,
+  `generic_c − generic` isolates sensor supervision exactly; nothing else differs.
+- **Design A (instrumentation-pretrained encoders) is retired** — the A-vs-C comparison was a
+  replication of the workshop mechanism, not the headline, and its cost was four extra trainings,
+  per-level encoder pretraining, and a 160-rollout mechanism table.
+- **Pretrained init is the assumed starting point, and the assumption is checked, not trusted.**
+  Both arms use it because it is the framework default (upstream lerobot ships
+  `pretrained_backbone_weights = "ResNet18_Weights.IMAGENET1K_V1"`) — but a single from-scratch
+  run at 100% verifies it, because for *contact audio* the assumption is genuinely unproven
+  (ManiWAV preferred from-scratch ASTs on contact-rich audio, albeit confounded with architecture).
+  Pre-registered one-sided rule: the run is **dropped unless it ties or beats `generic` at 100% ID**;
+  a loss or parity is the appendix init-verification row; only a win promotes it to a live arm.
+- **Rebaseline.** Demonstration collection is being redone and the cap-sensor
+  covered/uncovered thresholds are being recalibrated. Every N, duration, percentile, and
+  screening score in this protocol and the operator guide that was computed on the pre-revision
+  dataset is **provisional until re-derived**. The evaluation protocol also changed: the
+  ID/OOD sticker confirmation prompt is removed (the condition is a recorded label, not a
+  confirmed fact), and the operator can stop a rollout mid-run with Enter and record a visual
+  verdict (see §1.8).
+
+**Implementation** (committed; the pilot's tooling exists, the post-rebaseline data does not yet):
 
 | Script | Does |
 |---|---|
 | `ur5station/bottle/collect_data_bottle_opening.py` | collection entrypoint — wrist camera, audio, cap sensor, per-split pose seeds |
 | `ur5station/bottle/prepare_datasets_bottle.py` | the 8 prepared datasets: {9,12}-dim action × 4 data levels |
-| `ur5station/bottle/screen_instrumentation.py` | privilege gate + per-modality suitability (§1.4) |
-| `ur5station/bottle/train_ast_bottle.py` | design-A audio pretraining (forked from `train_ast_single.py`, which is unchanged) |
-| `ur5station/bottle/generate_configs.py` | the 16 training configs, with a build-time arm-parity assertion |
-| `agents/lerobot_agent.py` | `n_env_action_dims` — slices design C's auxiliary channels off before the robot |
+| `ur5station/bottle/screen_instrumentation.py` | privilege gate (mandatory) + per-modality suitability (§1.4, now diagnostic-only) |
+| `ur5station/bottle/generate_configs.py` | the 8 + 1 training configs, with a build-time arm-parity assertion |
+| `agents/lerobot_agent.py` | `n_env_action_dims` — slices `generic_c`'s auxiliary channels off before the robot |
 
-Fork changes live in `lerobot` at `dd8ad224`: the AST position-embedding fix (§4.7) and the `rgb_encoder_init_checkpoint` / `audio_encoder_init_checkpoint` fields. Design C needs no fork change at all.
+`train_ast_bottle.py` (design-A audio pretraining) and the `*_encoder_init_checkpoint` config
+fields are retired with design A; they stay on disk, unused, for the button-experiment lineage.
+Fork changes live in `lerobot` at `dd8ad224`: the AST position-embedding fix (§4.7) and the
+retired checkpoint-init fields. The mechanism needs no fork change at all — lerobot derives the
+denoised width from the dataset.
 
 ---
 
@@ -24,16 +61,16 @@ Fork changes live in `lerobot` at `dd8ad224`: the AST position-embedding fix (§
 
 | Item | Was | Now | Why |
 |---|---|---|---|
-| Mechanism | Encoder pretraining only | **Pretraining vs. auxiliary prediction, decided by the bottle pilot** | Colleague's workshop result (1 task, 1 seed, 100% data) suggests predicting the instrumentation alongside the action beats pretraining the encoder |
+| Mechanism | Encoder pretraining only | ~~Pretraining vs. auxiliary prediction, decided by the bottle pilot~~ → **auxiliary prediction only** (revised 2026-10; the A-vs-C comparison was retired — see revision block) | The workshop result plus the single-factor argument make C the chosen mechanism; re-deciding it cost four trainings and 160 rollouts |
 | Pilot task | Plugs | **Bottle** | Data collection is nearly built (`collect_data_bottle.py`) |
-| Modality choice | Argmax over image vs. audio | **Proprioception privilege gate (mandatory)** + threshold over all modalities (pilot-mandatory, diagnostic after) | Argmax discards a modality that works; the privilege gate tests whether the instrumentation is privileged at all; under design C nothing branches on the modality score |
+| Modality choice | Argmax over image vs. audio | **Proprioception privilege gate (mandatory)** + threshold over all modalities (**diagnostic-only since 2026-10**) | Argmax discards a modality that works; the privilege gate tests whether the instrumentation is privileged at all; with design A retired nothing branches on the modality score |
 | Statistics | Per-task, n=10 per cell | **Pooled across tasks, stratified by task** | n=10 cannot support the primary claim |
 | Wiping instrumentation | Vision grid coverage | **Force (load cell)** — coverage demoted to success criterion | Coverage index is redundant with proprioception under a non-revisiting snake path |
 | Bottle generalization axis | 3D-printed variants (cap stiffness + appearance) | **Appearance only** — one bottle, one cap, different stickers | No printing capacity for variants; costs the dynamics-transfer half of the axis |
 | Petri dish | 4 stages incl. lid open/close | **Lid pre-removed** — navigate + roll only | Confirmed: lid is off before the episode |
 | Casting pieces, ziplock | Task 5 / deferred | **Both out of scope** | — |
 | Instrumentation normalization | Sensor hardware range | **Calibrated covered/uncovered range** (see §1.7) | Hardware range compresses the useful signal to a fraction of its span |
-| Design A starting point | Random init | **Generic (ImageNet/AudioSet), then instrumentation** | Holds generic pretraining constant between the generic and design-A arms, so their gap is attributable to the instrumentation stage |
+| Design A starting point | Random init | ~~Generic (ImageNet/AudioSet), then instrumentation~~ **Design A retired 2026-10** (see revision block) | The instrumentation-pretraining stage cost the most in the matrix and bought a replication, not the headline |
 | Encoder input normalization | Not specified | **Per arm, matched to each encoder's initialization** (see §1.7) | A pretrained encoder is (weights, expected input distribution); splitting the two handicaps the control arm |
 | Step budget | Equalize total optimizer steps across arms | **Fixed 100K everywhere**, pretraining cost reported in text | The equalization is approximate anyway (encoder-only steps) and un-fixes the clean budget |
 
@@ -45,38 +82,39 @@ Fork changes live in `lerobot` at `dd8ad224`: the AST position-embedding fix (§
 
 Does task-specific instrumentation — privileged sensor signals available during training but not at inference — improve the data efficiency of imitation learning?
 
-**Hypothesis.** Supervising a policy with instrumentation signals acts as an inductive bias, teaching it to attend to task-relevant features. The same success rate is reached with fewer demonstrations than random initialization or generic pretraining achieve.
+**Hypothesis.** Supervising a policy with the instrumentation signal acts as an inductive bias, teaching it to attend to task-relevant features. The same success rate is reached with fewer demonstrations than a matched control — identical architecture, identical initialization, no instrumentation — achieves.
 
-**Contribution boundary.** The colleague's workshop paper establishes that auxiliary instrumentation prediction helps at 100% data on one task, one seed. This paper's contribution is the **data-efficiency curves** and the **generalization split** — how the benefit scales as demonstrations are removed, and whether it survives out of distribution. The mechanism comparison in §1.3 is a controlled replication that fixes which design the rest of the paper uses, not the headline. The privilege test in §1.4 is a supporting methodological note: worth a subsection, not a claim.
+**Contribution boundary.** The colleague's workshop paper establishes that auxiliary instrumentation prediction helps at 100% data on one task, one seed — but their treated arm differed from its baselines in two factors at once (random initialization *and* the auxiliary channels). This paper (1) re-runs the mechanism **de-confounded**: both arms start from the same standard pretrained initialization, so the gap is attributable to the instrumentation alone, and (2) makes the headline the **data-efficiency curves** — how the benefit scales as demonstrations are removed — plus the **appearance-generalization split**, whether it survives out of distribution. The privilege test in §1.4 is a supporting methodological note: worth a subsection, not a claim.
 
-## 1.2 Two candidate mechanisms
+## 1.2 The mechanism: auxiliary prediction channels
 
-**Design A — encoder pretraining.** Take a generic-pretrained perception encoder (ImageNet/AudioSet), finetune it to predict the instrumentation signal, then use those weights to initialize the policy encoder and finetune everything. Implemented by `rgb_encoder_init_checkpoint` / `audio_encoder_init_checkpoint`, loaded strictly after the encoders are built.
+**Design C — auxiliary prediction channels. THE RUN MECHANISM.** Append the instrumentation to the denoised output vector. Diffusion Policy predicts `[action (9), instrumentation (k)]` over the horizon; the instrumentation prediction is discarded at inference. Implemented entirely at the dataset level — a 12-dim `action` feature — because lerobot derives the denoised width from `config.action_feature.shape[0]`.
 
-**Design C — auxiliary prediction channels.** Append the instrumentation to the denoised output vector. Diffusion Policy predicts `[action (9), instrumentation (k)]` over the horizon; the instrumentation prediction is discarded at inference. Implemented entirely at the dataset level — a 12-dim `action` feature — because lerobot derives the denoised width from `config.action_feature.shape[0]`.
+The instrumentation is **never a policy input**: it appears only as extra dimensions the diffusion head denoises and inference throws away, so the deployed policy needs no sensor hardware. This is the paper's "no reliance" property, structural rather than aspirational — a policy cannot shortcut through a modality it cannot read at test time, and the auxiliary loss is the only path by which the signal can shape behaviour. It is also why C was preferred over A on principle, before any comparison was run: C is action-conditioned (the model learns what its chosen action chunk will *do* to the sensor, not just what the sensor reads now), it shapes the whole network rather than the encoder alone, and it is single-stage — which removes the "the treatment saw the data twice" objection entirely.
 
-Design C is expected to be stronger because it is action-conditioned (the model learns what its chosen action chunk will *do* to the sensor, not just what the sensor reads now), it shapes the whole network rather than the encoder alone, and it is single-stage — which removes the "the treatment saw the data twice" objection entirely.
+~~**Design A — encoder pretraining.** Take a generic-pretrained perception encoder (ImageNet/AudioSet), finetune it to predict the instrumentation signal, then use those weights to initialize the policy encoder and finetune everything.~~ **Retired 2026-10.** The A-vs-C comparison was a controlled replication of the workshop mechanism, not the headline; running A cost four extra trainings, per-level encoder pretraining, and the modality-suitability gate that only A needed. The machinery (`train_ast_bottle.py`, the `*_encoder_init_checkpoint` config fields, the fork's strict-load code) stays on disk in case the from-scratch verification cell below surprises us in a direction that revives the question.
 
 > An intermediate design B (auxiliary head hanging off the encoder, predicting the instrumentation at the current timestep) is **not** run. C subsumes what it was for, without the loss-weighting problem.
 
 ## 1.3 Variants
 
-Four arms on the pilot task. Whichever mechanism wins is carried forward as a three-arm comparison on the remaining tasks.
+Two arms on every task — control and treatment — plus a verification cell that runs once, on the pilot only.
 
 | Variant | Encoder init | Output vector | Role |
 |---|---|---|---|
-| **From scratch** | random | action only | lower baseline |
-| **Generic** | ImageNet / AudioSet | action only | is free pretraining enough? |
-| **A: instrumentation-pretrained** | instrumentation | action only | mechanism A |
-| **C: instrumentation channels** | random | action + instrumentation | mechanism C |
+| **`generic`** | ImageNet / AudioSet | action only | control |
+| **`generic_c`** | ImageNet / AudioSet | action + instrumentation | treatment; the *only* difference from the control is the auxiliary channels |
+| **`from_scratch`** | random | action only | init verification, pilot 100% level only; pre-registered one-sided rule, see below |
 
-**Why the generic arm survives even if C wins.** Under C there is no pretraining phase, so generic pretraining is no longer the parallel control. It earns its place for a different and more important reason: ImageNet weights are free and universal, while instrumentation requires building custom hardware per task. If generic matches instrumentation, the hardware is not worth it and the paper has no contribution. That is the first question a reviewer asks.
+**Why both arms start pretrained.** ImageNet/AudioSet initialization is the framework default — upstream lerobot's DiffusionPolicy ships `pretrained_backbone_weights = "ResNet18_Weights.IMAGENET1K_V1"` — so it is where any practitioner starts, and it makes the control as strong as free practice allows. It also collapses the design to a single manipulated factor: `generic` and `generic_c` share architecture, init, input normalization, hyperparameters, and step budget, differing only in the denoised width.
 
-All encoders are fine-tuned during policy training in every variant. Same architecture, same hyperparameters, same step budget. Only initialization and output dimensionality differ.
+**Why the assumption is checked, not trusted.** For *contact audio* specifically, "pretrained is free and always better" is unproven: ManiWAV found a from-scratch AST beat AudioSet-based audio encoders on contact-rich tasks — though their comparison confounds architecture with initialization (scratch transformer vs AudioSet-pretrained CNN), which is exactly the confound this design's verification cell avoids: same AST, same everything else, only init differs. The pre-registered one-sided rule: `from_scratch` is trained and evaluated once at the pilot's 100% level, and **dropped unless it ties or beats `generic` at 100% ID**. Parity or a loss is reported as the appendix init-verification row; a win promotes random init to a live third arm because it would mean AudioSet init actively misfits contact audio, which is a finding in its own right.
 
-## 1.4 Screening — one mandatory gate, one conditional diagnostic
+All encoders are fine-tuned during policy training in every variant. Same architecture, same hyperparameters, same step budget.
 
-Two cheap offline tests, neither needing robot time. They have **different statuses**, and the difference matters: one decides whether a task happens at all, the other only decides something under design A.
+## 1.4 Screening — one mandatory gate, one diagnostic
+
+Two cheap offline tests, neither needing robot time. They have **different statuses**, and the difference matters: one decides whether a task happens at all, the other explains *why* a task works — since design A was retired, nothing branches on the second score anymore.
 
 ### Step 1 — Privilege test — **mandatory, every task, before anything else**
 
@@ -88,11 +126,13 @@ This is a go/no-go on the task itself and is completely independent of which mec
 
 Run it on every task, including any new task proposed later, before building hardware.
 
-### Step 2 — Modality suitability — **mandatory for the pilot, diagnostic afterwards**
+### Step 2 — Modality suitability — **diagnostic (was pilot-mandatory under design A)**
 
 For each available modality — image (wrist camera), audio (AST spectrogram), force-torque (MLP over the 6-dim internal FT) — train an encoder to predict the instrumentation on the same 80/20 split.
 
-**Why it is mandatory for the bottle pilot.** Design A requires choosing *which* encoder to pretrain. That choice must be made by a pre-registered rule rather than by intuition, or the one comparison the paper hangs on is open to the cherry-picking objection. The rule: every modality clearing the bar is pretrained; those below it are not — a threshold, not an argmax, so a modality that works is not discarded merely because another works slightly better.
+~~**Why it is mandatory for the bottle pilot.** Design A requires choosing *which* encoder to pretrain. That choice must be made by a pre-registered rule rather than by intuition, or the one comparison the paper hangs on is open to the cherry-picking objection. The rule: every modality clearing the bar is pretrained; those below it are not — a threshold, not an argmax, so a modality that works is not discarded merely because another works slightly better.~~
+
+**Superseded 2026-10.** With design A retired there is no encoder-selection decision left to guard; the test keeps its metric discipline either way. Its former pre-registered rule (a threshold over each modality's margin above the trivial baseline, never an argmax) is retained below because the reported scores still need to be interpretable.
 
 The bar is **relative to a trivial baseline**, never an absolute percentage:
 
@@ -105,7 +145,7 @@ A flat 70% does not travel across signal types: binary accuracy floors at 50%, R
 
 Read every score as *how much this modality adds over proprioception*, using step 1 as the floor.
 
-**Why it demotes if design C wins.** Under C there is no encoder to select — the instrumentation is predicted from the fused representation of every modality present, and the generic arm simply loads ImageNet and AudioSet for all of them. No branch depends on the score, so the test stops being a gate. It remains worth running as a **results-section diagnostic**: it explains *why* the method works on a given task ("audio carries the seating click, image does not") and tells anyone reproducing the setup which sensors they actually need. Cheap, no robot time, but skippable under schedule pressure — the cost is an explanation, not a decision.
+**Why it is skippable under pressure (status since 2026-10).** Under the run mechanism there is no encoder to select — the instrumentation is predicted from the fused representation of every modality present, and both arms simply load ImageNet and AudioSet for all of them. No branch depends on the score, so the test is not a gate. It remains worth running as a **results-section diagnostic**: it explains *why* the method works on a given task ("audio carries the seating click, image does not") and tells anyone reproducing the setup which sensors they actually need. Cheap, no robot time, but skippable under schedule pressure — the cost is an explanation, not a decision.
 
 **Report both steps for every task attempted, including the ones that fail the gate.** Publishing the failures is what makes the protocol credible rather than post-hoc.
 
@@ -130,7 +170,7 @@ Read every score as *how much this modality adds over proprioception*, using ste
 ## 1.6 Finding N
 
 1. Collect a batch of 20 episodes.
-2. Train the from-scratch policy on everything collected so far.
+2. Train the **control** policy (`generic`) on everything collected so far.
 3. Evaluate with 20 rollouts.
 4. Repeat until success ≥ 90%, or plateau (≤ 5% improvement over two consecutive batches), or a cap of 100 episodes.
 5. N is then fixed for that task.
@@ -144,9 +184,7 @@ Report absolute episode counts alongside percentages ("25%, N=8"), since N will 
 - **Diffusion Policy** via lerobot, 10 Hz. Action representation: see below.
 - **Fixed 100K steps for every variant.** The exact budget does not matter — what matters is that it is equal. A result that holds under an unoptimized-but-equal budget is a stronger result, not a weaker one.
 - **Take the final checkpoint.** Not "select by rollout success" — that would mean real-robot rollouts on multiple checkpoints per config, silently multiplying the rollout budget. Fixed budget, final checkpoint, no selection.
-- **Pretraining (design A only):** early stopping on validation loss, BCE for binary, MSE for continuous. LR is **per-modality**: 1e-4 for the resnet, 1e-5 for the AST (the paper convention for finetuning a pretrained transformer). Frame it in the paper as *weight initialization*, not extra training: the encoder is ~5-20% of total policy parameters and pretraining is <5% of its total optimization.
-- **Design A starts from generic weights**, not random: ImageNet/AudioSet, *then* finetuned on the instrumentation signal. So generic pretraining is held constant between the generic and design-A arms, and the latter's gap over the former is attributable to the instrumentation stage.
-- **No step equalization.** An earlier draft added design A's pretraining steps to the other arms to match total optimizer steps. Dropped: the equalization is approximate anyway (those are encoder-only steps, not full-policy steps) and adding them un-fixes the clean 100K budget. Report design A's pretraining cost in the text instead, under the weight-initialization framing above. If a reviewer presses, a step-equalized rerun of the from-scratch and design-A arms alone is cheap to add.
+- ~~**Pretraining (design A only):** ...~~ / ~~**Design A starts from generic weights:** ...~~ / ~~**No step equalization:** ...~~ — the three design-A training rules (per-modality pretraining LRs, the two-stage starting point, the step-equalization debate) are retired with the arm; the single-stage treatment needs none of them. The whole design, `generic` and `generic_c` alike, is one 100K-step run.
 
 **Action representation: tool-frame deltas, kept.**
 
@@ -155,12 +193,12 @@ The policy predicts `[delta_xyz_tool(3), rot6d(R_delta)(6)]` — a translation o
 *The defense.* Tool-frame actions combined with a **wrist-mounted** camera make the policy equivariant to where the non-dominant arm presents the bottle: move the whole scene rigidly and both the correct action and the observed image are unchanged. The non-dominant arm presents the bottle at ~100 different poses, and the policy sees each as the same problem rather than a hundred separate ones. On a data-efficiency paper that equivariance is doing real work, which is also why **absolute joint space is the worse option here** — it would turn each presentation pose into a distinct configuration with no sharing between them.
 
 *Why not lerobot's relative-action processors.* Four reasons, in order of weight:
-1. It is orthogonal to the paper's claim. Action representation is a nuisance factor held identical across all four arms, so it moves absolute success rates but cannot affect the instrumentation comparison.
+1. It is orthogonal to the paper's claim. Action representation is a nuisance factor held identical across all arms, so it moves absolute success rates but cannot affect the instrumentation comparison.
 2. It would rewrite the eval path — the policy would emit absolute poses instead of deltas — which is the riskiest code to change immediately before collection.
 3. Relative-to-chunk-start **cannot be precomputed per frame** (frame *t*'s action appears in up to `horizon` chunks with different reference poses), so it has to be a processor step, and `make_diffusion_pre_post_processors` has none — the machinery is wired for the pi family only.
 4. `to_relative_actions` is elementwise subtraction, which cannot compose rotations: the rot6d dims would get a linear difference rather than a geometric delta. Invertible and therefore lossless, but not what the representation is supposed to mean.
 
-*Proprioception stays in `observation.state`.* It entered this protocol as the §1.4 screening gate, not as a policy input — the policy input is a separate decision, and it is to keep it: with `n_obs_steps = 2`, pose[t-1] and pose[t] give velocity, which is not cleanly recoverable from two wrist frames and matters for a contact task; the petri-dish task feeds the policy base-frame target coordinates, so stripping pose here would make the pilot structurally different from the tasks it is pooled with; and it is identical across all four arms, so it cannot affect the comparison either way.
+*Proprioception stays in `observation.state`.* It entered this protocol as the §1.4 screening gate, not as a policy input — the policy input is a separate decision, and it is to keep it: with `n_obs_steps = 2`, pose[t-1] and pose[t] give velocity, which is not cleanly recoverable from two wrist frames and matters for a contact task; the petri-dish task feeds the policy base-frame target coordinates, so stripping pose here would make the pilot structurally different from the tasks it is pooled with; and it is identical across all arms, so it cannot affect the comparison either way.
 
 *Limitation to state in the paper.* This is UMI's "delta" category, and its objection applies within a chunk: action *k* is an offset from pose[t+k], which the policy never observes, so later actions assume the earlier ones executed as predicted. Two things blunt it — each action is applied to the robot's **live** pose rather than to an integrated prediction, and at `n_action_steps = 8` / 10 Hz the accumulation window is 0.8 s. The principled fix, if a reviewer presses, is to express all `horizon` actions as tool-frame offsets from the *chunk-start* pose: UMI-correct and equivariance-preserving, but it needs a custom processor step, since neither a dataset transform nor lerobot's elementwise version can do it.
 
@@ -168,11 +206,11 @@ The policy predicts `[delta_xyz_tool(3), rot6d(R_delta)(6)]` — a translation o
 
 **Normalization of the instrumentation signal.**
 
-*Design C:* normalize the instrumentation channels with the **same normalizer lerobot applies to the action dims** (dataset mean/std). Mixed scales inside one denoised vector give the network badly conditioned inputs even though the loss is fine.
+*Treatment (`generic_c`):* normalize the instrumentation channels with the **same normalizer lerobot applies to the action dims** (dataset mean/std). Mixed scales inside one denoised vector give the network badly conditioned inputs even though the loss is fine.
 
-*Design A:* normalize to each channel's **measured operating range**, not the raw hardware range. Against a 0–3.3 V ADC span, the bottle sensor only ever traverses S0 2.96–3.25 V, S1 2.48–3.29 V, S2 2.08–3.25 V (global min/max over `sensor_logs/run_{0003,0005,0006}.json`, the runs under the current sensor layout — runs 0000–0002 used a different layout and are not comparable). Dividing by 3.3 V would compress the entire useful signal into a fraction of the range. These ranges come from separate calibration runs rather than the demonstration set, and are fixed before training and identical across all reduction levels, so there is no leakage. Re-derive alongside `PER_CHANNEL_THRESHOLDS` whenever the cap, sensor mounting or motion geometry changes.
+*Measured operating ranges* (formerly the design-A target normalization; the ranges remain the provenance for `PER_CHANNEL_THRESHOLDS`, whose recalibration is part of the 2026-10 rebaseline): against a 0–3.3 V ADC span, the bottle sensor only ever traversed S0 2.96–3.25 V, S1 2.48–3.29 V, S2 2.08–3.25 V (global min/max over `sensor_logs/run_{0003,0005,0006}.json`, the runs under the *previous* sensor layout — runs 0000–0002 used a different layout and are not comparable). Dividing by 3.3 V would compress the entire useful signal into a fraction of the range. Ranges must come from separate calibration runs rather than the demonstration set, so they are fixed before training and identical across all reduction levels — no leakage. **Re-derive alongside `PER_CHANNEL_THRESHOLDS` for the new sensor layout, and again whenever the cap, mounting or motion geometry changes.**
 
-**Auxiliary loss weighting (design C) is nearly free.** With `prediction_type=epsilon` every channel's regression target is the sampled noise ε ~ N(0, I), so all channels sit on the same loss scale regardless of what the underlying quantity is. With mean reduction over 12 channels, the 3 instrumentation dims take 3/12 = 25% of the objective automatically. No λ sweep, no gradient-norm matching. Just be deliberate that channel count sets the weight: three phototransistors give the instrumentation 25%, one gives it 10%.
+**Auxiliary loss weighting (the treatment) is nearly free.** With `prediction_type=epsilon` every channel's regression target is the sampled noise ε ~ N(0, I), so all channels sit on the same loss scale regardless of what the underlying quantity is. With mean reduction over 12 channels, the 3 instrumentation dims take 3/12 = 25% of the objective automatically. No λ sweep, no gradient-norm matching. Just be deliberate that channel count sets the weight: three phototransistors give the instrumentation 25%, one gives it 10%.
 
 Accept and state one consequence: the *action* term is correspondingly scaled 9/12 = 0.75× relative to the action-only arms. That is inherent to the design rather than a bug, it is what the colleague's workshop result already did, and isolating it would need a non-standard loss patch.
 
@@ -180,35 +218,33 @@ Accept and state one consequence: the *action* term is correspondingly scaled 9/
 
 | Arm | image (`dataset.use_imagenet_stats`) | audio (`audio_norm_mean/std`) |
 |---|---|---|
-| from-scratch | dataset (`false`) | dataset-computed |
-| generic | **ImageNet (`true`)** | **AudioSet: −4.2677393 / 4.5689974** |
-| design A | dataset (`false`) | dataset-computed |
-| design C | dataset (`false`) | dataset-computed |
+| generic **and generic_c** | **ImageNet (`true`)** | **AudioSet: −4.2677393 / 4.5689974** |
+| from_scratch (verification cell) | dataset (`false`) | per-level dataset-computed |
 
-Design A takes *dataset* stats despite starting from generic weights: the instrumentation stage is where its encoder last saw data, so it adapts to whatever normalization that stage used and the generic starting point is re-adapted away. Pretrain and deploy under the same stats. The random-init arms have no prior expectation, so dataset stats are simply the well-conditioned default.
+`audio_norm_mean`/`audio_norm_std` default to `0.0`/`1.0` — i.e. **no normalization at all** — so every arm must set them explicitly. The random-init cell has no prior expectation, so per-level dataset stats are simply the well-conditioned default (and per level, never global — the leak rule in `generate_configs.py`).
 
-`audio_norm_mean`/`audio_norm_std` default to `0.0`/`1.0` — i.e. **no normalization at all** — so every arm must set them explicitly. The pretraining script records the values it used in the checkpoint so the arm config can be asserted against them.
-
-Framing for the paper: *only the encoder initialization and its matched input normalization differ.* Still controlled, because normalization is a deterministic consequence of the chosen init rather than a tuned knob. One caveat to state: the generic and design-A arms therefore differ in normalization as well as in the instrumentation stage, so their difference is not a pristine isolation of that stage. Cheap insurance in reserve: rerun the generic arm with dataset normalization at 100% data only.
+Framing for the paper: the two curve arms are *identical in every respect except the three auxiliary channels of the denoised vector* — same initialization, so same matched input normalization, same hyperparameters, same step budget. This is exactly what the four-arm matrix could not offer: with A-vs-C (or generic-vs-C) the arms differed in initialization and normalization as well, so their gaps were not a pristine isolation of the treatment. The only init-dependent normalization contrast left in the design is `generic` vs the `from_scratch` verification cell, which is where the normalization difference *is* the thing being checked.
 
 ## 1.8 Evaluation
 
-- **20 real-world rollouts per configuration**: 10 in-distribution + 10 out-of-distribution.
+- **40 real-world rollouts per curve configuration**: 20 in-distribution + 20 out-of-distribution. The `from_scratch` verification cell runs ID only (20) — its decision rule is an ID comparison; OOD for it is optional extension, never gate.
 - **Success rate** is the only metric. No secondary metrics.
-- Rollout timeout: 2× the median demonstration duration.
+- Rollout timeout: 2× the median demonstration duration (**provisional at 65 s**; the median must be re-derived after the 2026-10 recollection — the guide's snippet recomputes it). The same timeout is used for every arm and condition; a config evaluated with a different timeout is not comparable.
+- A rollout ends on **sustained sensor success** (all channels above their thresholds for 5 consecutive steps), **timeout**, **force-abort** (any drift-corrected force axis beyond `MAX_ABS_FORCE_NEWTONS`), or an **operator Enter-stop**. An Enter-stopped rollout is scored by the operator's visual verdict — the episode's `next.success` and the results-row `success` take that answer, because a visibly-open cap whose third sensor channel never clears is a real success the sensors miss. Rows carry `success_source: "operator" | "sensors"`; the verdict never overrides a sensor-determined outcome. Every rollout end must be reported with its outcome class and source.
+- The ID/OOD condition is **declared by the operator's `--condition` flag, not verified by the script** (the confirmation prompt was removed 2026-10; the label is what the sticker state was at the operator's hand, and mislabeling is an operating error to avoid, not a check to automate).
 - OOD varies **only** the generalization axis. Every other condition — including the bottle-holding arm's pose distribution — is drawn from the training distribution, or an OOD failure cannot be attributed to the axis under test.
 
 **Statistics: pool across tasks, stratify by task.**
 
-Ten rollouts of one trained policy are ten samples of *that policy*, not of *the method* — the training run is the real experimental unit. Pooling across tasks supplies genuinely independent replicates, so this is a correctness improvement as well as a power one.
+Twenty rollouts of one trained policy are twenty samples of *that policy*, not of *the method* — the training run is the real experimental unit. Pooling across tasks supplies genuinely independent replicates, so this is a correctness improvement as well as a power one.
 
 Use **Cochran–Mantel–Haenszel** for pairwise variant comparisons at each data level, stratified by task, or a GLMM with variant and data level as fixed effects and task as a random effect. Do not simply concatenate the 2×2 tables — that invites Simpson's paradox if one task's effect runs the other way.
 
 | Rollouts per cell | 95% CI half-width at p≈0.5 | 50% vs 80% detectable? |
 |---|---|---|
-| 10 (one task) | ±28 pp | no, p ≈ 0.35 |
-| 30 (3 tasks) | ±17 pp | yes, p ≈ 0.03 |
-| 50 (5 tasks) | ±13 pp | comfortably |
+| 20 (one task) | ±22 pp | borderline, p ≈ 0.04 |
+| 60 (3 tasks) | ±13 pp | yes |
+| 100 (5 tasks) | ±10 pp | comfortably |
 
 **Pre-register the pooled analysis as primary and per-task curves as descriptive.** Deciding to pool after seeing per-task results is the thing reviewers punish.
 
@@ -216,10 +252,10 @@ Use **Cochran–Mantel–Haenszel** for pairwise variant comparisons at each dat
 
 Two distinct claims from the same rollouts. Never conflate them:
 
-- **Figure A — data efficiency:** success rate vs. % training data, ID rollouts only, pooled across tasks.
-- **Figure B — generalization:** ID vs. OOD success at each data level.
-- **Table 1 — screening:** per task, the proprioception privilege-test score for every task attempted (including those that failed the gate), plus modality suitability scores wherever they were run — mandatory for the pilot, diagnostic elsewhere.
-- **Table 2 — mechanism (pilot only):** design A vs. design C at every data level on the bottle.
+- **Figure A — data efficiency:** success rate vs. % training data, ID rollouts only, pooled across tasks, two curves (control, treatment).
+- **Figure B — generalization:** ID vs. OOD success at each data level, per arm.
+- **Table 1 — screening:** per task, the proprioception privilege-test score for every task attempted (including those that failed the gate), plus modality suitability scores wherever they were run — diagnostic on every task since 2026-10.
+- **Table 2 — init verification (pilot only):** `from_scratch` vs `generic` at 100% ID, with the pre-registered one-sided rule and the outcome it decided. Appendix material unless the cell won and became a live arm.
 
 ---
 
@@ -227,7 +263,10 @@ Two distinct claims from the same rollouts. Never conflate them:
 
 ## Task 1 — Bottle opening (pilot)
 
-The only task running all four variants. It decides the mechanism for everything else.
+The task that defines the design: the control and treatment arms run at all four data levels here,
+and the one-time `from_scratch` init-verification cell is decided here (100% level only, per the
+pre-registered rule in §1.3). The remaining tasks inherit the two-arm curve design; they do not
+re-run the init check.
 
 **Setup.** Left UR5 + Schunk gripper opens a flick-switch cap; right UR5 holds the bottle at a different pose each episode. Cap pose is recomputed live from the right arm's TCP (`bottle_station_env.py:47-50`), which is what makes the opening motion scriptable.
 
@@ -239,13 +278,13 @@ The only task running all four variants. It decides the mechanism for everything
 
 **Generalization axis — appearance only.** There is one physical bottle and one cap; no variants are 3D printed. OOD is produced by changing the bottle's **visual appearance** — stickers, tape, patterns, matte vs. glossy — while the mechanism stays identical. Train on one set of appearances, evaluate OOD on unseen ones.
 
-This is a narrower axis than the stiffness-plus-appearance split previously planned, and the paper should call it *appearance robustness* rather than generalization unqualified: cap dynamics no longer vary, so nothing here tests dynamics transfer. It is, however, tightly matched to the hypothesis — if instrumentation supervision really teaches the encoder to attend to cap state rather than incidental visual structure, it should be measurably less disturbed by appearance changes than the from-scratch variant is. Make the shift substantial (colour, pattern, coverage), not a single small sticker.
+This is a narrower axis than the stiffness-plus-appearance split previously planned, and the paper should call it *appearance robustness* rather than generalization unqualified: cap dynamics no longer vary, so nothing here tests dynamics transfer. It is, however, tightly matched to the hypothesis — if instrumentation supervision really teaches the encoder to attend to cap state rather than incidental visual structure, it should be measurably less disturbed by appearance changes than the control (`generic`) is. Make the shift substantial (colour, pattern, coverage), not a single small sticker.
 
 > ⚠️ **Two conditions this axis depends on. Verify both before collecting.**
 > 1. **Stickers must stay clear of the cap's light path.** The phototransistors measure light inside the cap. If a sticker changes what reaches them, `PER_CHANNEL_THRESHOLDS` no longer holds and the *success criterion itself* differs between ID and OOD — the two conditions would be scored with different rulers. Keep appearance changes on the bottle body, and re-read the sensor on a fully-open and fully-closed cap for every sticker configuration to confirm the voltages have not moved.
 > 2. **The appearance change must be visible to the wrist camera.** The wrist cam looks down at the cap; if the bottle body is mostly out of frame, ID and OOD observations are identical, there is no distribution shift, and OOD success trivially equals ID success. Check recorded `wrist_image` frames for how much body is in view before committing to sticker placement.
 
-*Optional second axis, free:* hold out a region of the right-arm pose space instead of sampling OOD poses from the training distribution. No hardware needed. Do not split the 10 OOD rollouts across two axes — too thin. Appearance is primary; keep pose-holdout in reserve.
+*Optional second axis, free:* hold out a region of the right-arm pose space instead of sampling OOD poses from the training distribution. No hardware needed. Do not split the 20 OOD rollouts across two axes — too thin. Appearance is primary; keep pose-holdout in reserve.
 
 ### Hardware and setup
 
@@ -262,22 +301,24 @@ The raw `ft` and the per-episode `ft_bias` are both recorded; the subtraction ha
 - [x] ~~Verify the wrist RealSense starts at 720p, not the 480p fallback.~~ **Done** — the fallback is removed; `create_wrist_camera` requests 720p and raises if that profile will not start (§4.6). Confirm the hardware actually supports it on the first run, since the D405 note in `ipc_camera.py:248` suggests it may not.
 - [ ] Fix the appearance set: how many sticker configurations, and which are train vs. OOD. No printing needed.
 - [ ] Verify both conditions in the generalization-axis warning above — sensor voltages unchanged by stickers, and stickers visible in the wrist frame.
-- [ ] Calibrate `PER_CHANNEL_THRESHOLDS` once for this cap and re-confirm after the stickers go on (`bottle_sensor.py:14-19`). With a single cap there is no per-variant recalibration — but there *is* a per-appearance sanity check, per the warning above.
+- [ ] **Recalibrate `PER_CHANNEL_THRESHOLDS` for the current sensor layout (in progress, 2026-10).** The live values (`bottle_sensor.py:23`, currently 3.17/3.18/3.00 V) derive from `sensor_logs/run_{0003,0005,0006}.json`, recorded under the *previous* layout; new covered/uncovered measurements are being taken. Re-derive the thresholds *and* `CALIBRATED_RANGE` (§1.7 instrumentation normalization) from the same run set, then re-confirm after the stickers go on. Nothing scored or labelled with the old constants is trustworthy — this gates the recollection below.
+- [ ] With a single cap there is no per-variant recalibration — but there *is* a per-appearance sanity check, per the warning above.
 
 ### Data collection
 
 - [x] ~~Fix the success-flag bug.~~ **Done** (§4.1). Episodes recorded *before* the fix are all labelled `success=False` regardless of outcome — discard or re-label them from the sensor logs before they enter any dataset.
 - [x] ~~Use a different RNG seed for val/test poses.~~ **Done** (§4.3) — per-split offsets.
+- [ ] **Recollect the train split (2026-10, gates everything below).** The existing 51 episodes were labelled and scored under the stale sensor constants; collection is being redone after the recalibration above. Until it lands: N=51, median duration 31.1 s, timeout 65 s, the screening scores, and every percentile in this protocol are **provisional** — the checkpoint-success-gate statistics in particular only become final on the new data.
 - [ ] Confirm the pose distribution for OOD rollouts matches training — only the appearance changes.
-- [ ] Run the N-finding loop: batches of 20, retrain from-scratch, 20 rollouts, stop at 90% or plateau, cap 100.
+- [ ] Run the N-finding loop (§1.6): batches of 20, retrain the **control** (`generic` @ 100% of what exists so far), 20 rollouts, stop at 90% or plateau, cap 100.
 
 ### Screening
 
 - [x] **Privilege test** (mandatory). Proprioception MLP → 3-channel sensor. Expect it to fail the gate (cap rotation depends on grip slip and thread engagement, not just wrist angle) — but confirm it, because a scripted motion makes proprioception unusually informative. Run once (see table below): a moderate positive signal, neither a clean pass nor a clean fail against any fixed threshold.
-- [x] **Modality suitability** (mandatory here — design A needs it to pick which encoder to pretrain). Wrist image, audio (AST), FT. Record all scores and fix the threshold *before* looking at them. All three run once (see table below).
-- [x] Both tests run from `ur5station/bottle/screen_instrumentation.py`, which builds the *policy's own* encoder classes from the arm's config, so the resulting weights load into the policy with `strict=True` and no key remapping. Audio pretraining for design A proper is `ur5station/bottle/train_ast_bottle.py`.
+- [x] **Modality suitability** (**diagnostic since 2026-10** — it was mandatory only because design A needed it to pick which encoder to pretrain; with A retired, nothing branches on these scores). Wrist image, audio (AST), FT. Record all scores and fix the threshold *before* looking at them. All three run once (see table below); re-run on the recollected data before reporting them.
+- [x] Both tests run from `ur5station/bottle/screen_instrumentation.py`, which builds the *policy's own* encoder classes from the arm's config, so the resulting weights load into the policy with `strict=True` and no key remapping. ~~Audio pretraining for design A proper is `ur5station/bottle/train_ast_bottle.py`~~ — that script is retired with design A (kept on disk for the button lineage).
 
-**Preliminary results** (`datasets/bottle_experiment/prepared/bottle_9d_100`, 51 episodes, one run each, 10 epochs, R² against a mean-predictor on held-out validation). One run per modality so far — to be extended with more runs/seeds before this is load-bearing for anything.
+**Preliminary results** (`datasets/bottle_experiment/prepared/bottle_9d_100`, 51 episodes, one run each, 10 epochs, R² against a mean-predictor on held-out validation). **Provisional twice over:** one run per modality, and computed on the pre-recollection dataset — extend with more seeds and re-run on the new data before treating any of this as load-bearing.
 
 | Modality | r2_mean | S0 | S1 | S2 | Notes |
 |---|---|---|---|---|---|
@@ -286,15 +327,15 @@ The raw `ft` and the per-episode `ft_bias` are both recorded; the subtraction ha
 | Audio (AST spectrogram) | 0.606 | 0.666 | 0.675 | 0.476 | Second-strongest. Getting here needed a fix: the first attempts crashed identically (`RuntimeError: Could not push packet to decoder`) decoding the small (128×298) `spectogram_values` AV1 stream, reproducible at both `num_workers=4` and `num_workers=1` — so not a cross-worker race, but torchcodec breaking in any forked worker process. Video confirmed not corrupted (a full sequential ffmpeg decode and a single-process frame-by-frame torchcodec decode of all 16,405 frames both passed cleanly). Fixed by setting `video_backend="pyav"` for the audio case only (`screen_instrumentation.py`), keeping `num_workers=4`. |
 | FT (internal force-torque) | 0.096 | 0.085 | 0.067 | 0.135 | Weakest, close to the mean-predictor floor |
 
-### Training and the mechanism comparison
+### Training and the two-arm curves
 
 - [x] ~~Confirm design C needs no collection-code change.~~ **Confirmed and implemented.** `ur5station/bottle/prepare_datasets_bottle.py` emits a 12-dim `action` = `[action(9), bottle_sensor(3)]`; lerobot reads the denoised width from `config.action_feature.shape[0]`, so the U-Net, sampling prior and MIN_MAX normalizer all widen with no policy change. Verified: both widths build, train and sample, +10,755 params (0.004%).
-- [x] ~~Add the inference slice.~~ **Done** — `LerobotAgent(n_env_action_dims=9)` truncates after the postprocessor. Pass `9` for **all four arms** (a no-op for three of them) so the eval path is byte-identical across arms.
-- [ ] Build the 8 prepared datasets (`prepare_datasets_bottle.py`) once collection and success-filtering are complete.
-- [ ] Generate the 16 configs (`bottle/generate_configs.py`) — it asserts at build time that the arms differ only in intended keys, at every level. `audio_norm_mean/std` are **per level**: the random-init arms read that level's `audio_stats.json` (written by `prepare_datasets_bottle`, computed over exactly the episodes the level trains on) and design_a reads that level's pretraining checkpoint — a single global value would leak the 100% run's statistics into the smaller levels, invisibly to the arm comparison but squarely into the data-efficiency claim. Design_a is generated with an explicit `--design-a-modalities` (the operator's pre-registered call from the screening scores): a modality that did **not** pass the filter keeps the *generic* initialization and its matched normalization inside design_a, so arm 3 stays "arm 2 + instrumentation exactly where the signal is perceivable". The generator refuses missing or cross-level checkpoints.
-- [ ] Train 4 arms × 4 data levels = 16 runs, 100K steps each, final checkpoint.
-- [ ] 16 configs × 20 rollouts = **320 rollouts** for the pilot.
-- [ ] Decide the mechanism from Table 2, then carry the winner forward.
+- [x] ~~Add the inference slice.~~ **Done** — `LerobotAgent(n_env_action_dims=9)` truncates after the postprocessor. Pass `9` for **all arms** (a no-op for all but `generic_c`) so the eval path is byte-identical across arms.
+- [ ] Build the 8 prepared datasets (`prepare_datasets_bottle.py`) once the **recollected** data and recalibrated thresholds land — success-filtering and `audio_stats.json` are both computed from the sensor constants, so building on the old data just defers the rebuild.
+- [ ] Generate the 8 curve configs (`bottle/generate_configs.py`, default `--arms generic,generic_c`) — it asserts at build time that the arms differ only in intended keys, at every level. The verification cell is generated separately, deliberately narrowly: `--arms from_scratch --levels 100`. `audio_norm_mean/std` stay **per level** for the random-init cell (that level's `audio_stats.json`, written by `prepare_datasets_bottle`, computed over exactly the episodes the level trains on — a global value would leak the 100% run's statistics into smaller levels); the generic arms carry AudioSet's dataset-independent constants and have no leak surface. The design-A inputs (`--design-a-modalities`, `--pretrain-dir`) are gone with the arm.
+- [ ] Train 2 arms × 4 data levels = **8 curve runs**, plus the single `from_scratch`@100% verification run. 100K steps each, final checkpoint.
+- [ ] 8 curve configs × (20 ID + 20 OOD) + verification cell 20 ID = **340 rollouts** for the pilot (360 if the verification cell's optional OOD extension is run — it can never gate anything).
+- [ ] Apply the init-verification rule (Table 2): `from_scratch`@100% ID vs `generic`@100% ID — tie or win promotes it to a live arm, loss or parity files it as the appendix verification row. Then analyze the two-arm curves: Figure A (ID, pooled) and Figure B (ID vs OOD per arm).
 
 ## Task 2 — Rubber plug insertion
 
@@ -307,7 +348,7 @@ The raw `ft` and the per-episode `ft_bias` are both recorded; the subtraction ha
 - [ ] Confirm the cluttered-box protocol: all six sizes in the box simultaneously (industry-realistic), or one size presented per trial?
 - [ ] Confirm box dimensions and whether plugs are reshuffled between trials.
 - [ ] Privilege test (mandatory): expect a clear pass — the gripper can be at the correct pose with the plug unseated, so proprioception cannot predict seating.
-- [ ] Modality suitability (mandatory if the pilot selects design A; diagnostic if it selects C): audio is the hypothesis, via the seating click. Use **balanced accuracy or AUC**, not raw accuracy — the signal is near-zero for most of every episode.
+- [ ] Modality suitability (diagnostic on every task since 2026-10 — design A, the only thing that ever branched on it, is retired): audio is the hypothesis, via the seating click. Use **balanced accuracy or AUC**, not raw accuracy — the signal is near-zero for most of every episode.
 - [ ] Script the insertion with circuit closure as the episode-termination signal.
 
 ## Task 3 — Petri dish rolling
@@ -320,7 +361,7 @@ The raw `ft` and the per-episode `ft_bias` are both recorded; the subtraction ha
 - [ ] Determine [F_min, F_max] empirically from demonstrations (mean ± 1 SD of scripted force).
 - [ ] **Confirm the force tolerance is genuinely narrow.** If any force in a wide band succeeds, the task is too easy to be worth imitation learning. Open since 30 June, still unanswered, and it decides whether this task ships.
 - [ ] Privilege test (mandatory): expect a pass — contact force is not in joint angles.
-- [ ] Modality suitability (mandatory if the pilot selects design A; diagnostic if it selects C — but run it here regardless, it answers a question the paper wants). Audio is the hypothesis: friction and contact sound. This is where the **visually-identical-materials** question gets answered: white painted wood and a white plastic plate look the same to the camera but differ acoustically (wood duller, 200-800 Hz; plastic sharper, >1 kHz). If audio can predict force with visual input held constant, that is a result worth reporting on its own.
+- [ ] Modality suitability (diagnostic — see Task 2; run it here regardless, it answers a question the paper wants). Audio is the hypothesis: friction and contact sound. This is where the **visually-identical-materials** question gets answered: white painted wood and a white plastic plate look the same to the camera but differ acoustically (wood duller, 200-800 Hz; plastic sharper, >1 kHz). If audio can predict force with visual input held constant, that is a result worth reporting on its own.
 - [ ] Coordinate input: 3D point + surface normal, passed to the policy.
 - [ ] Optional side experiment: FT encoder → predict the external load cell. Standalone, not part of the variant comparison (see the parity caveat in §1.4).
 

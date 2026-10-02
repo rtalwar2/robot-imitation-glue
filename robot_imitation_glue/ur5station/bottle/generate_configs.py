@@ -1,48 +1,57 @@
-"""Generate the 16 bottle-experiment training configs (4 arms x 4 data levels).
+"""Generate the bottle-experiment training configs: two arms plus the init-verification cell.
 
-Written as a generator rather than 16 hand-maintained JSON files because the entire experiment rests
-on the arms being identical except where they are meant to differ. Hand-editing 16 files makes silent
-drift a matter of time; here every shared value has exactly one definition, and `_assert_arms_differ_
-only_in` fails the build if an unintended key ever diverges.
+Rewritten as of 2026-10-02 (branch `ral_simplified`): the four-arm matrix (from_scratch, generic,
+design_a, design_c) was simplified to a single-factor comparison. Written as a generator rather
+than hand-maintained JSON files because the entire experiment rests on the arms being identical
+except where they are meant to differ; every shared value has exactly one definition, and
+`_assert_arms_differ_only_in` fails the build if an unintended key ever diverges.
 
 What each arm is:
 
-    from_scratch  random encoders
-    generic       ImageNet + AudioSet
-    design_a      generic, then finetuned on the instrumentation signal (an increment on `generic`)
-    design_c      random encoders, but the denoised vector is [action(9), instrumentation(3)]
+    generic       CONTROL. ImageNet/AudioSet initialization -- the framework default everyone
+                  trains from (upstream lerobot's DiffusionPolicy ships `pretrained_backbone_weights
+                  = "ResNet18_Weights.IMAGENET1K_V1"`). Denoised vector = action(9).
+    generic_c     TREATMENT. Identical to generic except the dataset's 12-dim action =
+                  [action(9), instrumentation(3)]; lerobot derives the denoised width from the
+                  dataset's `action` feature, so that single change IS the whole mechanism. The
+                  instrumentation is never a policy input and is sliced off at inference -- the
+                  deployed policy needs no sensor hardware. generic vs generic_c therefore
+                  isolates sensor supervision exactly; no second factor is ever in play.
+    from_scratch  VERIFICATION CELL, not a live arm. Random encoders, action(9). Trained and
+                  evaluated once, at the 100% level only, to check the assumption that standard
+                  pretrained init is never worse than random on this task family (it is an
+                  assumption worth checking: ManiWAV's audio ablation preferred from-scratch ASTs
+                  on contact audio, though that comparison confounds architecture with init).
+                  Pre-registered one-sided rule: it is dropped from the design unless it ties or
+                  beats `generic` at 100% ID -- a loss (or parity) is reported as the appendix
+                  init-verification row, only a win promotes it to a live arm.
 
-design_c differs only by its dataset: lerobot reads the denoised width from the dataset's `action`
-feature, so pointing it at the 12-dim prepared dataset is the whole mechanism.
+Why the matrix was simplified: the design-A (encoder pretraining) vs design-C (auxiliary
+prediction) mechanism comparison is retired -- the mechanism itself comes from the colleague's
+workshop paper, and running A would spend four trainings plus 160 rollouts on a comparison that is
+explicitly not the headline. The workshop's C arm also differed from its baselines in two factors
+at once (random init AND auxiliary channels); placing the mechanism on the standard pretrained
+init makes this paper's comparison single-factor and de-confounds it.
 
-Two rules this generator enforces, both of which an earlier version got wrong:
+Two rules this generator still enforces:
 
-**Audio normalization is per LEVEL, never global.** `audio_norm_mean/std` for the random-init arms
-come from that level's own `audio_stats.json` (written by prepare_datasets_bottle over exactly the
-episodes the level trains on), and for design_a from that level's own pretraining checkpoint. A
-single global value -- e.g. the 100% pretraining run's stats reused at 25% -- hands a run statistics
-from episodes it never sees. Because every arm at a level would share the leaked value, the arm
-comparison would look clean while the data-efficiency claim (the paper's headline) is contaminated.
+**Audio normalization for random-init arms is per LEVEL, never global.** `audio_norm_mean/std`
+for `from_scratch` come from that level's own `audio_stats.json` (written by
+prepare_datasets_bottle over exactly the episodes the level trains on). A single global value --
+e.g. the 100% run's stats reused at 25% -- hands a run statistics from episodes it never sees.
+The generic arms load AudioSet's own normalization constants, which are dataset-independent, so
+they have no leak surface; the rule exists to protect the random-init cell and survives the
+simplification unchanged.
 
-**design_a initializes only the modalities that passed the suitability filter** (--design-a-modalities,
-the operator's pre-registered call from the screening scores). A modality that did NOT pass keeps the
-GENERIC initialization and its matched normalization, so design_a stays "generic + instrumentation
-where the signal is perceivable" -- per modality, arm 2 nested inside arm 3. Unconditionally pointing
-both encoders at checkpoints would either crash on a missing file or silently pretend an unsuitable
-modality was pretrained.
-
-Normalization is matched to whatever each encoder was last trained under, which is why it is an
-intended difference rather than a parity violation: ImageNet/AudioSet stats for generic weights,
-that level's dataset stats for random-init and instrumentation-pretrained encoders.
+**Nothing is hand-edited into a generated config.** Change the generator, re-run, keep the parity
+assertion green.
 
 Usage:
-    # before design-A pretraining exists (needs audio_stats.json from prepare_datasets_bottle):
-    python -m robot_imitation_glue.ur5station.bottle.generate_configs \\
-        --arms from_scratch,generic,design_c
+    # the eight curve configs (2 arms x 4 levels):
+    python -m robot_imitation_glue.ur5station.bottle.generate_configs
 
-    # once the per-level checkpoints exist in --pretrain-dir:
-    python -m robot_imitation_glue.ur5station.bottle.generate_configs \\
-        --arms design_a --design-a-modalities image,audio --pretrain-dir outputs/pretrain
+    # the verification cell (100% only, per the pre-registered rule):
+    python -m robot_imitation_glue.ur5station.bottle.generate_configs --arms from_scratch --levels 100
 """
 
 import argparse
@@ -50,10 +59,8 @@ import copy
 import json
 from pathlib import Path
 
-import torch
-
 DATA_LEVELS = ("100", "75", "50", "25")
-ARMS = ("from_scratch", "generic", "design_a", "design_c")
+ARMS = ("generic", "generic_c", "from_scratch")
 
 DATASET_ROOT = "datasets/bottle_experiment/prepared"
 AUDIO_BACKBONE = "MIT/ast-finetuned-audioset-10-10-0.4593"
@@ -75,8 +82,6 @@ INTENDED_ARM_DIFFERENCES = {
     "policy.pretrained_audio_weights",
     "policy.audio_norm_mean",
     "policy.audio_norm_std",
-    "policy.rgb_encoder_init_checkpoint",
-    "policy.audio_encoder_init_checkpoint",
     "policy.output_features",  # documentation only; make_policy overwrites it from the dataset
 }
 
@@ -95,28 +100,6 @@ def load_level_audio_stats(level: str) -> dict:
             "a global value would leak across data levels)"
         )
     return json.loads(path.read_text())
-
-
-def load_pretrain_checkpoint_meta(pretrain_dir: Path, modality: str, level: str) -> dict:
-    """The recorded metadata of a design-A pretraining checkpoint, verified against the level.
-
-    The checkpoint records which dataset it was trained on; a level mismatch means someone pointed
-    level 25 at the 100% checkpoint, which is exactly the cross-level leak this generator refuses.
-    """
-    path = pretrain_dir / f"bottle_{'rgb' if modality == 'image' else 'audio'}_{level}.pt"
-    if not path.exists():
-        raise FileNotFoundError(
-            f"{path} not found -- pretrain the {modality} encoder on bottle_9d_{level} first, or "
-            f"drop '{modality}' from --design-a-modalities"
-        )
-    payload = torch.load(path, map_location="cpu", weights_only=False)
-    recorded_root = str(payload.get("dataset_root", ""))
-    if f"_{level}" not in Path(recorded_root).name:
-        raise ValueError(
-            f"{path} records dataset_root={recorded_root!r}, which does not look like level {level} "
-            "-- a checkpoint pretrained on another level would leak that level's data into this one"
-        )
-    return {"path": str(path), **{k: payload[k] for k in payload if k != "encoder_state_dict"}}
 
 
 def base_config(audio_norm_mean: float, audio_norm_std: float, time_dimension: int, steps: int) -> dict:
@@ -150,9 +133,8 @@ def base_config(audio_norm_mean: float, audio_norm_std: float, time_dimension: i
         "resume": False,
         "seed": 2025,
         "num_workers": 8,
-        # 64 OOM'd on a 24GB card: unfrozen AST (audio_norm_mean/std pretraining, then
-        # end-to-end finetuning) plus the resnet18 RGB encoder plus the diffusion U-Net
-        # (down_dims up to 2048) all trained together left no headroom.
+        # 64 OOM'd on a 24GB card: the unfrozen AST plus the resnet18 RGB encoder plus the diffusion
+        # U-Net (down_dims up to 2048), all trained end-to-end, left no headroom at that batch size.
         "batch_size": 32,
         "steps": steps,
         "eval_freq": 0,
@@ -213,8 +195,8 @@ def base_config(audio_norm_mean: float, audio_norm_std: float, time_dimension: i
             "crop_is_random": True,
             "pretrained_backbone_weights": None,
             # false in every arm: the encoder raises if GroupNorm is combined with torchvision
-            # pretrained weights, and flipping it for the ImageNet arm alone would leave that arm the
-            # only one using BatchNorm -- an architecture difference confounded with initialization.
+            # pretrained weights, and flipping it for the generic arms alone would leave them the
+            # only ones using BatchNorm -- an architecture difference confounded with initialization.
             "use_group_norm": False,
             "spatial_softmax_num_keypoints": 32,
             "use_separate_rgb_encoder_per_camera": True,
@@ -241,9 +223,9 @@ def base_config(audio_norm_mean: float, audio_norm_std: float, time_dimension: i
             "beta_schedule": "squaredcos_cap_v2",
             "beta_start": 0.0001,
             "beta_end": 0.02,
-            # epsilon-prediction is what makes design C's loss weighting free: every channel's target
-            # is unit Gaussian noise, so the 3 instrumentation dims take 3/12 of the objective with no
-            # weight to tune.
+            # epsilon-prediction is what makes the auxiliary channels' loss weighting free: every
+            # channel's target is unit Gaussian noise, so the 3 instrumentation dims of the
+            # treatment arm take 3/12 of the objective with no weight to tune.
             "prediction_type": "epsilon",
             "clip_sample": True,
             "clip_sample_range": 1.0,
@@ -259,15 +241,9 @@ def base_config(audio_norm_mean: float, audio_norm_std: float, time_dimension: i
     }
 
 
-def apply_arm(
-    config: dict,
-    arm: str,
-    level: str,
-    pretrain_dir: Path | None = None,
-    design_a_modalities: tuple[str, ...] = (),
-) -> dict:
+def apply_arm(config: dict, arm: str, level: str) -> dict:
     config = copy.deepcopy(config)
-    action_dims = 12 if arm == "design_c" else 9
+    action_dims = 12 if arm == "generic_c" else 9
     dataset_name = f"bottle_{action_dims}d_{level}"
 
     config["dataset"]["repo_id"] = dataset_name
@@ -279,47 +255,15 @@ def apply_arm(
     # namespace as the button experiment's checkpoints (ramen-noodels/red_round_button_*).
     config["policy"]["repo_id"] = f"ramen-noodels/bottle_{arm}_{level}"
 
-    if arm == "generic":
+    if arm in ("generic", "generic_c"):
         config["policy"]["pretrained_backbone_weights"] = IMAGENET_RESNET18
         config["policy"]["pretrained_audio_weights"] = True
-        # Matched to the weights: these encoders expect their pretraining distribution.
+        # Matched to the weights: these encoders expect their pretraining distribution. This is
+        # also why the generic arms carry no per-level stats leak surface -- AudioSet's constants
+        # know nothing about this task's episodes.
         config["dataset"]["use_imagenet_stats"] = True
         config["policy"]["audio_norm_mean"] = AUDIOSET_NORM_MEAN
         config["policy"]["audio_norm_std"] = AUDIOSET_NORM_STD
-
-    if arm == "design_a":
-        if pretrain_dir is None or not design_a_modalities:
-            raise ValueError(
-                "design_a needs --pretrain-dir and --design-a-modalities (the modalities that "
-                "passed the pre-registered suitability threshold)"
-            )
-        # Per modality: passed the filter -> that level's instrumentation checkpoint, normalization
-        # matched to what the pretraining used. Did NOT pass -> the GENERIC init and ITS matched
-        # normalization, so design_a stays arm 2 + instrumentation exactly where the signal is
-        # perceivable, and nowhere else.
-        if "image" in design_a_modalities:
-            meta = load_pretrain_checkpoint_meta(pretrain_dir, "image", level)
-            # pretrained_backbone_weights stays None: the checkpoint already holds the
-            # ImageNet-derived, instrumentation-finetuned weights, torchvision's would be overwritten.
-            config["policy"]["rgb_encoder_init_checkpoint"] = meta["path"]
-        else:
-            config["policy"]["pretrained_backbone_weights"] = IMAGENET_RESNET18
-            config["dataset"]["use_imagenet_stats"] = True
-        if "audio" in design_a_modalities:
-            meta = load_pretrain_checkpoint_meta(pretrain_dir, "audio", level)
-            config["policy"]["audio_encoder_init_checkpoint"] = meta["path"]
-            # The stats the encoder was actually finetuned under, recorded in the checkpoint.
-            config["policy"]["audio_norm_mean"] = float(meta["audio_norm_mean"])
-            config["policy"]["audio_norm_std"] = float(meta["audio_norm_std"])
-            if int(meta["time_dimension"]) != int(config["policy"]["time_dimension"]):
-                raise ValueError(
-                    f"audio checkpoint time_dimension={meta['time_dimension']} != dataset "
-                    f"time_dimension={config['policy']['time_dimension']} at level {level}"
-                )
-        else:
-            config["policy"]["pretrained_audio_weights"] = True
-            config["policy"]["audio_norm_mean"] = AUDIOSET_NORM_MEAN
-            config["policy"]["audio_norm_std"] = AUDIOSET_NORM_STD
 
     return config
 
@@ -329,7 +273,7 @@ def _flatten(config: dict, prefix: str = "") -> dict:
     for key, value in config.items():
         path = f"{prefix}{key}"
         if isinstance(value, dict):
-            flat |= _flatten(value, f"{path}.")
+            flat |= _flatten(config=value, prefix=f"{path}.")
         else:
             flat[path] = value
     return flat
@@ -355,18 +299,11 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--arms",
-        default=",".join(ARMS),
-        help="comma-separated subset of arms to generate. Lets the non-design_a configs exist "
-        "before the per-level pretraining checkpoints do.",
+        default="generic,generic_c",
+        help="comma-separated subset of {generic, generic_c, from_scratch}; the curve defaults to "
+        "control + treatment, from_scratch is the verification cell (run it with --levels 100)",
     )
-    parser.add_argument(
-        "--design-a-modalities",
-        default=None,
-        help="comma-separated subset of {image,audio} that passed the pre-registered suitability "
-        "threshold. Required when generating design_a. A modality not listed keeps the GENERIC "
-        "initialization inside design_a.",
-    )
-    parser.add_argument("--pretrain-dir", type=Path, default=None, help="dir with bottle_{rgb,audio}_{level}.pt")
+    parser.add_argument("--levels", default=",".join(DATA_LEVELS), help="comma-separated subset of 100,75,50,25")
     parser.add_argument("--steps", type=int, default=100_000)
     parser.add_argument("--output-dir", type=Path, default=Path(__file__).parent / "configs")
     args = parser.parse_args()
@@ -375,30 +312,27 @@ def main() -> None:
     unknown = set(arms) - set(ARMS)
     if unknown:
         raise SystemExit(f"unknown arms {sorted(unknown)}; choose from {ARMS}")
-    modalities = tuple(m.strip() for m in (args.design_a_modalities or "").split(",") if m.strip())
-    if set(modalities) - {"image", "audio"}:
-        raise SystemExit("--design-a-modalities entries must be from {image,audio}")
-    if "design_a" in arms and not modalities:
-        raise SystemExit(
-            "generating design_a requires --design-a-modalities: state which modalities passed the "
-            "suitability filter (this is the operator's pre-registered call, not a default)"
-        )
+    levels = tuple(entry.strip() for entry in args.levels.split(",") if entry.strip())
+    unknown_levels = set(levels) - set(DATA_LEVELS)
+    if unknown_levels:
+        raise SystemExit(f"unknown levels {sorted(unknown_levels)}; choose from {DATA_LEVELS}")
 
-    # Build EVERYTHING before writing ANYTHING: a missing checkpoint at level 75 must not leave a
+    # Build EVERYTHING before writing ANYTHING: a missing stats file at level 75 must not leave a
     # freshly written level-100 config behind, or a partial (and easily stale) set gets trained.
     to_write = {}
     for level in DATA_LEVELS:
-        # Per-LEVEL base: audio normalization comes from that level's own episodes. One base for
-        # all arms at a level, so the parity check below compares like with like.
+        if level not in levels:
+            continue
+        # Per-LEVEL base: audio normalization for the random-init cell comes from that level's own
+        # episodes. One base for all arms at a level, so the parity check below compares like with
+        # like.
         stats = load_level_audio_stats(level)
         base = base_config(stats["audio_norm_mean"], stats["audio_norm_std"], stats["time_dimension"], args.steps)
 
         # Parity check at every level, always against from_scratch as the reference -- it needs
-        # nothing but the stats file, so it is constructible even when only design_a is requested.
-        built = {
-            arm: apply_arm(base, arm, level, args.pretrain_dir, modalities)
-            for arm in dict.fromkeys(("from_scratch", *arms))
-        }
+        # nothing but the stats file, so it is constructible even when only the generic arms are
+        # requested.
+        built = {arm: apply_arm(base, arm, level) for arm in dict.fromkeys(("from_scratch", *arms))}
         _assert_arms_differ_only_in(built, INTENDED_ARM_DIFFERENCES)
         for arm in arms:
             to_write[f"bottle_{arm}_{level}.json"] = built[arm]
