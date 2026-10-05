@@ -602,7 +602,10 @@ def _main_body(sensor_logger):
     )
     print(f"[done] opening motion {'succeeded' if opened else 'FAILED'}")
 
-    ur_left.move_to_joint_configuration([ 0.06967844 ,-1.40953115 ,-1.61241627, -1.67278638 , 1.54791272 , 3.03650355])
+    # .wait() so the retreat completes BEFORE save(): the cap is still open during it, and those
+    # seconds are exactly the uncovered plateau derive_thresholds.py needs (without it the stream
+    # ends at leg_6_end and the S2 plateau is a handful of samples).
+    ur_left.move_to_joint_configuration([ 0.06967844 ,-1.40953115 ,-1.61241627, -1.67278638 , 1.54791272 , 3.03650355]).wait()
     sensor_logger.log_event("retreat_home")
 
     run_index = len([n for n in os.listdir(SENSOR_LOG_DIR) if n.endswith(".json")]) if os.path.isdir(SENSOR_LOG_DIR) else 0
