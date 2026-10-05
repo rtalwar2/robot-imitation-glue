@@ -56,7 +56,8 @@ from calibrate_and_hover_bottle import (
     tcp_left_to_camera,
 )
 from camera_utils import freeze_auto_exposure
-from lid_touch_point_annotator import OUTPUT_DIR, ClickState, draw_overlay
+from lid_touch_point_annotator import OUTPUT_DIR
+from open_bottle_demo import verify_or_correct_touch_point
 from touch_point_detector import detect_touch_point
 
 # same BLE device/characteristic as instrumentation_ble_plot3.py
@@ -433,41 +434,6 @@ def compute_yawed_gripper_orientation(cap_normal, reference_direction, yaw_deg):
     return orthonormalize_rotation(np.column_stack([x_axis, y_axis, z_axis]))
 
 
-def verify_or_correct_touch_point(image_bgr, detected_pixel):
-    """Show the frame in an OpenCV window so the detection can be verified or corrected.
-
-    Click to set a corrected touch point (green cross; click again to move it), press
-    Enter/y/space to accept the current point, r to undo the correction, q/Esc to abort.
-    When the detection failed (detected_pixel is None), a click is required before
-    accepting. Returns (final_pixel, corrected_click_or_None, overlay_image).
-    """
-    window_name = "Verify touch point (click to correct)"
-    cv2.namedWindow(window_name, cv2.WINDOW_AUTOSIZE)
-    click_state = ClickState()
-    cv2.setMouseCallback(window_name, click_state.on_mouse_event)
-
-    if detected_pixel is None:
-        print("[verify] detection FAILED -- click the touch point manually, then press Enter")
-    print("[verify] keys: click=correct, Enter/y/space=accept, r=undo correction, q/Esc=abort")
-
-    while True:
-        overlay = draw_overlay(image_bgr, click_state.point, detected_pixel)
-        cv2.imshow(window_name, overlay)
-        key = cv2.waitKey(30) & 0xFF
-        if key in (13, ord("y"), ord(" ")):
-            final_pixel = click_state.point if click_state.point is not None else detected_pixel
-            if final_pixel is None:
-                print("[verify] no touch point set yet -- click one first")
-                continue
-            cv2.destroyWindow(window_name)
-            return final_pixel, click_state.point, overlay
-        elif key == ord("r"):
-            click_state.point = None
-        elif key in (27, ord("q")):
-            cv2.destroyAllWindows()
-            raise SystemExit("Aborted at touch-point verification -- not moving.")
-
-
 def save_touch_point_sample(image_bgr, overlay, hover_height, click_xy, detected_xy):
     """Append this frame + human-verified touch point to the lid_touch_point_debug dataset,
     in the same sample_NNNN format the annotation tool writes (so all evaluation tooling
@@ -501,7 +467,7 @@ def _main_body(sensor_logger):
     print(f"hover pose: {hover_pose}")
     print(f"Moving ur_left above the bottle cap at {hover_pose[:3, 3]}")
 
-    ur_left.move_linear_to_tcp_pose(hover_pose, linear_speed=0.05).wait()
+    ur_left.move_to_tcp_pose(hover_pose, joint_speed=0.05).wait()
     time.sleep(1)
     sensor_logger.log_event("hover_reached")
     cap_center = cap_pose[:3, 3]
@@ -518,12 +484,19 @@ def _main_body(sensor_logger):
     image_rgb = camera.get_rgb_image_as_int()
     image_bgr = ImageConverter.from_numpy_int_format(image_rgb).image_in_opencv_format
 
+    def grab_and_detect():
+        # fresh grab + detection for 't' at the verify window (the collector's blurred-frame fix);
+        # the arm is parked at the hover pose, so hover_height and the camera pose stay valid.
+        rgb = camera.get_rgb_image_as_int()
+        bgr = ImageConverter.from_numpy_int_format(rgb).image_in_opencv_format
+        return bgr, detect_touch_point(bgr, hover_height)
+
     detected_pixel = detect_touch_point(image_bgr, hover_height)
 
     # verify/correct interactively, and grow the labeled dataset with this frame:
     # click_xy is the human-verified ground truth (the accepted detection, or the correction)
     touch_pixel, corrected_pixel, verify_overlay, image_bgr, detected_pixel = verify_or_correct_touch_point(
-        image_bgr, detected_pixel
+        image_bgr, detected_pixel, regrab=grab_and_detect
     )
     save_touch_point_sample(image_bgr, verify_overlay, hover_height, touch_pixel, detected_pixel)
     if corrected_pixel is not None:
