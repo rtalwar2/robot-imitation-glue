@@ -30,7 +30,7 @@ from robot_imitation_glue.collect_data_delta import (
     policy_action_to_tcp_pose,
     step_action_to_policy_action_6d,
 )
-from robot_imitation_glue.hardware.bottle_sensor import SENSOR_CHECKPOINTS, is_uncovered
+from robot_imitation_glue.hardware.bottle_sensor import PER_CHANNEL_THRESHOLDS, SENSOR_CHECKPOINTS, is_uncovered
 from robot_imitation_glue.utils import precise_wait
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -42,6 +42,15 @@ from calibrate_and_hover_bottle import (  # noqa: E402
     compute_hover_pose_above_bottle,
     tcp_left_to_camera,
 )
+from motion_constants import (  # noqa: E402
+    DEPTH_NUDGE_M,
+    LEGS,
+    MAX_MOTION_RETRIES,
+    OPEN_DWELL_S,
+    OPEN_POLL_S,
+    RETRACT_LIFT_METERS,
+    STOP_LEGS_WHEN_OPEN,
+)
 from open_bottle_agent import (  # noqa: E402
     LEFT_HOME_JOINTS,
     LEFT_TRANSIT_JOINT_SPEED,
@@ -52,7 +61,6 @@ from open_bottle_agent import (  # noqa: E402
     plan_opening_motion,
 )
 from open_bottle_demo import (  # noqa: E402
-    LEGS,
     pixel_to_point_on_cap_plane,
     save_touch_point_sample,
     verify_or_correct_touch_point,
@@ -60,10 +68,6 @@ from open_bottle_demo import (  # noqa: E402
 from touch_point_detector import detect_touch_point  # noqa: E402
 
 logger = loguru.logger
-
-DEPTH_NUDGE_M = 0.003  # metres to press deeper per retry attempt, along -cap_normal
-MAX_MOTION_RETRIES = 3  # how many times to retract and redo the whole push+legs motion
-RETRACT_LIFT_METERS = 0.05  # metres to lift off the cap along its normal before retrying
 
 
 def log_observation_to_rerun(obs, recording, n_episodes, label=""):
@@ -201,14 +205,62 @@ def _check_checkpoint(env, event_name):
     return False
 
 
+def _cap_is_open_sustained(env, dwell_s=OPEN_DWELL_S):
+    """True only if every channel holds at/above its own threshold for `dwell_s` straight.
+
+    Polled because the DDS subscriber keeps a single sample (History.KeepLast(1)) -- there is no
+    history to look back through, so "sustained" has to be measured forward. The poll does not move
+    the arm, which leaves a dwell_s gap in the recorded frames; that is deliberate, since a gap is
+    cheaper than skipping the check and labelling run_0017's transient a success.
+    """
+    if not env.bottle_sensor.has_received_sample():
+        raise RuntimeError(
+            f"bottle_sensor has never received a DDS sample -- is bottle_ble_reader.py running and "
+            f"connected? Stop-on-open would otherwise never fire (or fire off garbage)."
+        )
+    deadline = time.monotonic() + dwell_s
+    while True:
+        reading = env.bottle_sensor.get_bottle_sensor()
+        if not is_uncovered(reading, list(range(len(PER_CHANNEL_THRESHOLDS)))):
+            return False
+        if time.monotonic() >= deadline:
+            return True
+        precise_wait(OPEN_POLL_S)
+
+
+def _lift_off_cap(env, dataset_recorder, cap_normal, control_period, reason):
+    """Lift RETRACT_LIFT_METERS along the cap normal to disengage the gripper, recorded.
+
+    Shared by the retry path and the stop-on-open exit: the gripper is pressed 2+ cm below the cap
+    plane, so ending the motion means coming off the cap the same way in both cases. Going all the
+    way back to the hover pose would work but wastes most of the travel -- the episode's own retreat
+    handles that, and every centimetre here is recorded as demonstration steps.
+    """
+    print(f"[move] lifting {RETRACT_LIFT_METERS * 100:.0f}cm off the cap ({reason})")
+    lift_pose = env.get_robot_pose_se3().copy()
+    lift_pose[:3, 3] = lift_pose[:3, 3] + RETRACT_LIFT_METERS * cap_normal
+    return servo_to_waypoint(
+        env,
+        dataset_recorder,
+        lift_pose,
+        control_period,
+        label=f"lifting {RETRACT_LIFT_METERS * 100:.0f}cm ({reason})",
+    )
+
+
 def _build_motion_segments(plan):
     """The motion as an ordered list of (label, base_target_pose, checkpoint_event_or_None).
 
-    Segment order: approach (yaw+descend, ungated) -> push (push_end) -> leg2 (ungated) ->
-    leg3 (leg_3_end) -> leg4 (ungated) -> leg5 (ungated) -> leg6 (leg_6_end).
+    Segment order: approach (yaw+descend, ungated) -> push (gated only if push_end is in
+    SENSOR_CHECKPOINTS) -> leg2 (leg_2_end) -> leg3 (leg_3_end) -> leg4..leg6 (ungated).
     """
     approach_pose, push_pose, *leg_poses = plan["waypoint_poses"]
-    segments = [("approach", approach_pose, None), ("push", push_pose, "push_end")]
+    # Only name a checkpoint that the map actually gates: a segment labelled with an ungated event
+    # still counts towards _previous_checkpoint_segment_index, so the cascade would read
+    # "the earlier checkpoint also failed" every time and force a full restart instead of resuming
+    # from the last leg that really did uncover its channel.
+    push_ckpt = "push_end" if "push_end" in SENSOR_CHECKPOINTS else None
+    segments = [("approach", approach_pose, None), ("push", push_pose, push_ckpt)]
     for leg_index, leg_pose in enumerate(leg_poses):
         angle_deg, offset = LEGS[leg_index]
         event_name = f"leg_{leg_index + 2}_end"
@@ -228,7 +280,7 @@ def _previous_checkpoint_segment_index(segments, segment_index):
 
 def run_opening_motion_with_retry(env, dataset_recorder, plan, cap_normal, control_period):
     """Execute the descend + push + LEGS motion, gated by sensor-verified checkpoints
-    (push_end, leg_3_end, leg_6_end -- see SENSOR_CHECKPOINTS), pressing DEPTH_NUDGE_M
+    (leg_2_end, leg_3_end -- see SENSOR_CHECKPOINTS), pressing DEPTH_NUDGE_M
     deeper into the cap on every retry (an identical replay would very likely just fail
     identically) -- up to MAX_MOTION_RETRIES times.
 
@@ -239,15 +291,20 @@ def run_opening_motion_with_retry(env, dataset_recorder, plan, cap_normal, contr
         before it (they're still fine, no need to redo them).
       - If the earlier checkpoint has ALSO lost its grip, the problem runs deeper than just
         this leg -- restart the whole motion from the grip point.
-      - The first checkpoint (push_end) has no earlier checkpoint to fall back on, so its
+      - The first checkpoint (leg_2_end) has no earlier checkpoint to fall back on, so its
         failure always triggers a full restart.
     The retraction and every (partial or full) redo are recorded as ordinary steps, so a
     slipped grip and its recovery become part of the demonstration.
 
-    Returns (final_pose, success): success is True only once leg_6_end -- the checkpoint
-    for the last channel to uncover -- has passed.
+    Returns (final_pose, success): success is True only once the LAST gated checkpoint of
+    SENSOR_CHECKPOINTS -- the stage where the final channel uncovers -- has passed. It is located
+    by position rather than by a hardcoded event name: after the 2026-10-07 remap to
+    {leg_2_end: S0, leg_3_end: S1+S2} a literal "leg_6_end" comparison could never fire, and every
+    episode would have been recorded as a failure.
     """
     segments = _build_motion_segments(plan)
+    gated_indices = [i for i, (_, _, cp) in enumerate(segments) if cp is not None]
+    last_gated_index = gated_indices[-1] if gated_indices else None
 
     attempt = 0
     resume_index = 0
@@ -265,6 +322,7 @@ def run_opening_motion_with_retry(env, dataset_recorder, plan, cap_normal, contr
 
         episode_success = False
         checkpoint_failed_index = None
+        stopped_open = False
         for segment_index in range(resume_index, len(segments)):
             label, base_pose, checkpoint_name = segments[segment_index]
             target_pose = base_pose.copy()
@@ -275,14 +333,33 @@ def run_opening_motion_with_retry(env, dataset_recorder, plan, cap_normal, contr
                 label=f"attempt {attempt}: {label}",
             )
 
+            # Checked after every segment, including ungated ones: once the whole cap is open the
+            # remaining legs have nothing left to do. Cost is nil before the pop -- the poll returns
+            # on its first read as soon as any channel is still covered.
+            if STOP_LEGS_WHEN_OPEN and _cap_is_open_sustained(env):
+                episode_success = True
+                stopped_open = True
+                logger.info(
+                    f"[verify] cap fully open (all {len(PER_CHANNEL_THRESHOLDS)} channels >= threshold for "
+                    f"{OPEN_DWELL_S}s) after '{label}' -- skipping the remaining "
+                    f"{len(segments) - segment_index - 1} segment(s) and lifting off"
+                )
+                break
+
             if checkpoint_name is None:
                 continue
             checkpoint_ok = _check_checkpoint(env, checkpoint_name)
             if checkpoint_ok is False:
                 checkpoint_failed_index = segment_index
                 break
-            if checkpoint_ok is True and checkpoint_name == "leg_6_end":
+            if checkpoint_ok is True and segment_index == last_gated_index:
                 episode_success = True
+
+        if stopped_open:
+            reached_pose = _lift_off_cap(
+                env, dataset_recorder, cap_normal, control_period, reason="cap already open"
+            )
+            return reached_pose, True
 
         if checkpoint_failed_index is None:
             return reached_pose, episode_success
@@ -292,15 +369,9 @@ def run_opening_motion_with_retry(env, dataset_recorder, plan, cap_normal, contr
             return reached_pose, False
 
         # Lift just far enough to disengage the gripper from the cap, so the sensor reads the cap's
-        # own state rather than whatever the gripper is holding it in. Going all the way back to the
-        # hover pose would work too but wastes most of the travel: the re-check only needs the cap
-        # released, and every centimetre of it is recorded as demonstration steps.
-        print(f"[verify] lifting {RETRACT_LIFT_METERS * 100:.0f}cm off the cap to check recovery state")
-        lift_pose = env.get_robot_pose_se3().copy()
-        lift_pose[:3, 3] = lift_pose[:3, 3] + RETRACT_LIFT_METERS * cap_normal
-        servo_to_waypoint(
-            env, dataset_recorder, lift_pose, control_period,
-            label=f"lifting {RETRACT_LIFT_METERS * 100:.0f}cm to retry",
+        # own state rather than whatever the gripper is holding it in.
+        reached_pose = _lift_off_cap(
+            env, dataset_recorder, cap_normal, control_period, reason="to check recovery state"
         )
 
         previous_segment_index = _previous_checkpoint_segment_index(segments, checkpoint_failed_index)

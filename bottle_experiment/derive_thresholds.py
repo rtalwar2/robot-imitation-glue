@@ -57,10 +57,12 @@ import numpy as np
 DEFAULT_LOG_DIR = Path("/home/rtalwar/robot-imitation-glue/bottle_experiment/sensor_logs")
 BOTTLE_SENSOR_PY = Path("/home/rtalwar/robot-imitation-glue/robot_imitation_glue/hardware/bottle_sensor.py")
 
-# Channel -> event marking that channel's checkpoint (mirrors SENSOR_CHECKPOINTS in
-# hardware/bottle_sensor.py). Overridable with --events; used for the mapping check and printed
-# against the detected crossings, NOT for cutting the analysis windows (see module docstring).
-DEFAULT_TRANSITION_EVENTS = ["push_end", "leg_3_end", "leg_6_end"]
+# Channel -> the checkpoint event that gates it, ONE PER CHANNEL (repeat an event when a
+# checkpoint gates several channels, as the 2026-10-07 remap does for S1+S2 at leg_3_end).
+# Mirrors SENSOR_CHECKPOINTS in hardware/bottle_sensor.py; overridable with --events. Used for
+# the mapping check and printed against the detected crossings, NOT for cutting the analysis
+# windows (see module docstring).
+DEFAULT_TRANSITION_EVENTS = ["leg_2_end", "leg_3_end", "leg_3_end"]
 
 
 def load_run(path: Path) -> tuple[list[list[float]], dict[str, float]]:
@@ -140,13 +142,20 @@ def report_proposal(ceiling, floor, proposed, args) -> None:
         print(f"  in-use (bottle_sensor.py): {[f'{v:.2f}' for v in live]}")
 
 
-def report_paste(per_ch, proposed) -> None:
-    lo = {ch: min(min(d[1]) for d in per_ch[ch]) for ch in per_ch}
-    hi = {ch: max(max(d[2]) for d in per_ch[ch]) for ch in per_ch}
+def report_paste(windows, proposed) -> None:
+    # The range is the GLOBAL min/max over all samples of the runs where the channel opened --
+    # deliberately not the window bounds. normalize_sensor reads raw values frame-by-frame at
+    # train/screen time, and demonstration frames contain the transients the analysis windows
+    # exclude (a pre-pop overshoot can top the plateau; S1's does by 9 mV). A normalization
+    # envelope that misses values the network will see is the one error this paste cannot have.
+    lo, hi = {}, {}
+    for ch in range(3):
+        vals = [s[ch + 1] for _, samples, _, ch_data in windows if ch in ch_data for s in samples]
+        lo[ch], hi[ch] = min(vals), max(vals)
     cal_range = tuple((round(float(lo[ch]), 3), round(float(hi[ch]), 3)) for ch in range(3))
-    print("\nPaste candidates (bottle_sensor.py + demo-script copy + train_ast_bottle.py CALIBRATED_RANGE, together):")
+    print("\nPaste candidates (bottle_sensor.py + train_ast_bottle.py CALIBRATED_RANGE, together):")
     print(f"PER_CHANNEL_THRESHOLDS = [{proposed[0]}, {proposed[1]}, {proposed[2]}]  # S0, S1, S2, in volts")
-    print(f"CALIBRATED_RANGE = ({cal_range[0]}, {cal_range[1]}, {cal_range[2]})")
+    print(f"CALIBRATED_RANGE = ({cal_range[0]}, {cal_range[1]}, {cal_range[2]})  # global min/max over opened runs")
 
 
 def report_bands(windows, transitions, proposed, args) -> None:
@@ -206,7 +215,10 @@ def report_mapping(windows, transitions, proposed) -> None:
             if reading[ch] < proposed[ch]:
                 notes.append(f"S{ch} NOT open at {event} ({reading[ch]:.3f} < {proposed[ch]:.2f})")
             for later in range(ch + 1, 3):
-                if later in proposed and reading[later] >= proposed[later]:
+                # "already open" is only an anomaly if the later channel's OWN gate is a
+                # different event; channels sharing a checkpoint (S1+S2 @ leg_3_end) are
+                # expected to be open at it.
+                if later in proposed and transitions[later] != event and reading[later] >= proposed[later]:
                     notes.append(f"S{later} already open at {event}")
         print(f"  {stem}: {'OK' if not notes else '; '.join(notes)}")
 
@@ -305,7 +317,7 @@ def main() -> None:
         sys.exit("no usable windows for channel(s) " + ", ".join(missing) + " — check the runs")
 
     report_proposal(ceiling, floor, proposed, args)
-    report_paste(per_ch, proposed)
+    report_paste(windows, proposed)
     report_bands(windows, transitions, proposed, args)
     report_mapping(windows, transitions, proposed)
 

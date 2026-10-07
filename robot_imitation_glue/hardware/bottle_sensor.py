@@ -11,26 +11,35 @@ from cyclonedds.sub import DataReader
 from cyclonedds.topic import Topic
 from sensor_comm_dds.communication.data_classes.sequence import Sequence
 
-# Each channel's own covered/uncovered voltage separation, derived from runs 0003/0005/0006
-# (the 3 runs under the current motion parameters -- 0000-0002 used a different sensor
-# layout and aren't comparable). S0 covered ~3.01-3.11 / uncovered ~3.24 (jumps at the
-# initial push, before any leg) -- covered baseline has drifted up across these runs, so the
-# threshold sits above the highest observed covered reading (3.11) with only ~0.13V margin
-# to the lowest uncovered reading (3.24); re-check if it drifts further. S1 covered ~2.9-3.14
-# / uncovered ~3.28 (jumps at leg_3). S2 covered ~2.6-2.9 / uncovered ~3.23-3.24 (jumps by
-# leg_5 in 2/3 runs, needed one retry to clear by leg_6 in the third). Re-derive if the
-# sensor mounting, cap, or opening-motion geometry changes.
-PER_CHANNEL_THRESHOLDS = [3.17, 3.18, 3.00]  # S0, S1, S2, in volts
+# Each channel's covered/uncovered separation, derived by bottle_experiment/derive_thresholds.py
+# from the calibration runs recorded under the CURRENT motion: run_0013, run_0018, run_0020-0023
+# (the "test" split poses). run_0017/run_0019 are pose 1, which never opened, and the tool
+# excludes them by itself. Worst-case bands over those runs: S0 covered p99 3.103 / open p1 3.213,
+# S1 2.975 / 3.204, S2 2.932 / 3.223 V.
+#   S0 3.16 -- midpoint of a deliberately thin band: S0's whole excursion is only ~0.11-0.16 V, so
+#              any threshold leaves ~0.05 V of cushion either side. Re-check this channel whenever
+#              the mounting is touched.
+#   S1 3.12 -- biased high on purpose. The old 3.18 sat only 0.024 V below the observed open floor,
+#              so a genuine open could read covered; 3.12 keeps 0.145 V above the covered ceiling
+#              and 0.084 V below the open floor. (The tool's symmetric midpoint is 3.09.)
+#   S2 3.08 -- midpoint. The old 3.00 sat only 0.068 V above the covered ceiling, which is the
+#              dangerous direction: a still-covered cap could be declared open.
+# This file is the single source: the analyze fork, the collector and eval all import these, so
+# the only value that must be re-derived alongside them is CALIBRATED_RANGE in train_ast_bottle.py.
+# Run derive_thresholds.py on the calibration batch to move the two together.
+PER_CHANNEL_THRESHOLDS = [3.16, 3.12, 3.08]  # S0, S1, S2, in volts
 
 # Which sensor channel (index into PER_CHANNEL_THRESHOLDS) must be uncovered by each named
-# checkpoint of the opening motion, per run_0003.json: S0 pops open on the initial push
-# (before any leg), S1 by leg_3, S2 by leg_6. Each checkpoint gates exactly the one channel
-# that reliably transitions there -- earlier checkpoints don't re-check channels that already
-# passed, since a sensor covering back up isn't expected once uncovered.
+# checkpoint, measured on the same runs. S0 crosses right at the end of the push (-0.26 s to
+# +0.12 s around push_end) and was at 100% within the first 16% of leg 2 in every run, so gating it
+# AT push_end failed 2 of 4 runs that opened perfectly -- and with the retry mechanism that means a
+# needless retract + DEPTH_NUDGE_M deeper. It now gates at leg_2_end. S1 and S2 both cross during
+# leg 3 (S1 ~36-49% and S2 ~66-83% into the segment), so leg_3_end gates both. leg_6_end is gone:
+# S2 had already been open for ~2.4 s by then, so that checkpoint passed trivially and proved
+# nothing.
 SENSOR_CHECKPOINTS = {
-    "push_end": [0],
-    "leg_3_end": [1],
-    "leg_6_end": [2],
+    "leg_2_end": [0],
+    "leg_3_end": [1, 2],
 }
 
 

@@ -29,7 +29,8 @@ Flow:
      height fixed;
   8. finally execute the LEGS list in order: each leg travels its offset at its angle
      counter-clockwise from the PREVIOUS leg's direction (the first is relative to the
-     push direction; 90 = perpendicular/left), all at the same height.
+     push direction; 90 = perpendicular/left), each descending LEG_DEPTH_STEP_M deeper below
+     the cap plane than the leg before it (0.0 = all at the same height).
 """
 
 import json
@@ -52,40 +53,20 @@ from calibrate_and_hover_bottle import (
 )
 from camera_utils import freeze_auto_exposure
 from lid_touch_point_annotator import OUTPUT_DIR, ClickState, draw_overlay
+from motion_constants import (
+    APPROACH_OFFSET,
+    GRIPPER_YAW_DEG,
+    LEGS,
+    LEG_DEPTH_STEP_M,
+    MOVE_SPEED,
+    PUSH_OVERSHOOT,
+    PUSH_TARGET_TANGENTIAL_OFFSET,
+    RADIAL_OUTWARD_OFFSET,
+    TANGENTIAL_OFFSET,
+    YAW_SPEED,
+)
 from touch_point_detector import detect_touch_point
 import time
-
-APPROACH_OFFSET = -0.022  # metres above the grip point where the gripper stops (negative = press below the cap plane)
-RADIAL_OUTWARD_OFFSET = 0.01  # metres from the touch point radially outward (away from the cap center)
-# metres to the "left" of the touch point: along the cap-plane tangent at the touch point,
-# in the counter-clockwise direction about the cap's outward normal (the direction the old
-# circular motion went). Negate if "left" turns out to be the other way on the real bottle.
-TANGENTIAL_OFFSET = -0.04
-# metres to the "left" of the cap center (same tangential axis as TANGENTIAL_OFFSET):
-# the push line ends here instead of at the center itself
-PUSH_TARGET_TANGENTIAL_OFFSET = 0.30
-# metres to keep pushing past the push end point along the same line (0.0 = stop exactly
-# there; negative = stop short of it)
-PUSH_OVERSHOOT = -0.27
-# legs of the opening motion, executed in order after the push, each as
-# (angle_deg, offset_m). The angle is measured counter-clockwise about the cap's outward
-# normal RELATIVE TO THE PREVIOUS leg's direction (the first entry is relative to the
-# push direction; 90 = exactly perpendicular/"to the left"). The offset is the distance
-# travelled. All legs run in the cap plane at the pressed height. Add/remove/tune entries
-# freely -- the planned path preview, prints, and execution all follow this list.
-LEGS = [
-    (45.0, 0.03),  # second leg
-    (20.0, 0.06),  # third leg
-    (30.0, 0.04),  # fourth leg
-    (30.0, 0.03),  # fifth leg
-    (30.0, 0.01),  # fifth leg
-]
-# yaw of the gripper about its own TCP z-axis (which faces the cap), applied by rotating
-# in place BEFORE descending to the grip point. Defined relative to the touch-point ->
-# bottle-center axis: at 0 the gripper's x-axis points from the touch point toward the
-# center; positive rotates counter-clockwise about the cap's outward normal.
-GRIPPER_YAW_DEG = 90
-MOVE_SPEED = 0.01  # m/s, same slow speed as the annotation tool
 
 
 def pixel_to_point_on_cap_plane(pixel_xy, intrinsics, camera_pose_in_base, cap_pose_in_base):
@@ -204,6 +185,12 @@ def save_touch_point_sample(image_bgr, overlay, hover_height, click_xy, detected
 
 
 if __name__ == "__main__":
+    # Deferred on purpose: open_bottle_agent imports this module's motion constants, so a
+    # module-level import of it back here is an unresolvable circular import -- both this
+    # script and the analyze fork fail at import time. Flat module name, as every other
+    # bottle_experiment import in this file.
+    from open_bottle_agent import LEFT_HOME_JOINTS, LEFT_TRANSIT_JOINT_SPEED
+
     rr.init("open_bottle_demo", spawn=True)
     # 720p to match touch_point_detector's radius prior (calibrated on 720p frames);
     # intrinsics_matrix() returns the intrinsics for this stream resolution.
@@ -212,7 +199,9 @@ if __name__ == "__main__":
     intrinsics = camera.intrinsics_matrix()
     ur_left = URrtde(ip_address=LEFT_ROBOT_IP)
     # ur_left.move_to_joint_configuration([ 0.06967844 ,-1.40953115 ,-1.61241627, -1.67278638 , 1.54791272 , 3.03650355],joint_speed=0.02).wait()
-    ur_left.move_to_joint_configuration([ 0.06980903 ,-0.46889468, -1.61281288 ,-1.67641511 , 1.54615736 , 0], joint_speed=0.2).wait()
+    # ur_left.move_to_joint_configuration([ 0.06980903 ,-0.46889468, -1.61281288 ,-1.67641511 , 1.54615736 , 0], joint_speed=0.2).wait()
+    ur_left.move_to_joint_configuration(LEFT_HOME_JOINTS, joint_speed=LEFT_TRANSIT_JOINT_SPEED).wait()
+
     # time.sleep(2)
     ur_right = URrtde(ip_address=RIGHT_ROBOT_IP)
     ur_right.rtde_control.teachMode()
@@ -275,9 +264,9 @@ if __name__ == "__main__":
     push_target = push_end + APPROACH_OFFSET * cap_normal + PUSH_OVERSHOOT * push_direction
 
     # legs after the push: each direction is the previous leg's direction rotated by the
-    # leg's angle counter-clockwise about the cap normal, all in the cap plane at the
-    # pressed height. leg_ends are the cap-plane points (for the image preview),
-    # leg_targets the pressed-height points the robot actually moves to.
+    # leg's angle counter-clockwise about the cap normal, and each leg ends LEG_DEPTH_STEP_M
+    # deeper than the previous one. leg_ends are the cap-plane points (for the image preview),
+    # leg_targets the actually-descending points the robot moves to.
     leg_ends, leg_targets = [], []
     leg_direction = push_direction
     leg_end, leg_target = push_end, push_target
@@ -286,7 +275,7 @@ if __name__ == "__main__":
         leg_direction -= cap_normal * cap_normal.dot(leg_direction)  # keep exactly in-plane
         leg_direction /= np.linalg.norm(leg_direction)
         leg_end = leg_end + offset * leg_direction
-        leg_target = leg_target + offset * leg_direction
+        leg_target = leg_target + offset * leg_direction - LEG_DEPTH_STEP_M * cap_normal
         leg_ends.append(leg_end)
         leg_targets.append(leg_target)
 
@@ -322,7 +311,7 @@ if __name__ == "__main__":
     yaw_pose[:3, :3] = yawed_rotation
     yaw_pose[:3, 3] = start_pose[:3, 3]
     print(f"[move] yawing gripper to {GRIPPER_YAW_DEG:.0f} deg relative to the touch->center axis")
-    ur_left.move_linear_to_tcp_pose(yaw_pose, linear_speed=0.2).wait()
+    ur_left.move_linear_to_tcp_pose(yaw_pose, linear_speed=YAW_SPEED).wait()
 
     # descend to the grip point (TANGENTIAL_OFFSET left of the touch point, APPROACH_OFFSET
     # along the cap normal), keeping the yawed orientation
@@ -344,8 +333,9 @@ if __name__ == "__main__":
     for i, ((angle_deg, offset), leg_target) in enumerate(zip(LEGS, leg_targets)):
         leg_pose = leg_pose.copy()
         leg_pose[:3, 3] = leg_target
-        print(f"[push] leg {i + 2} ({angle_deg:.0f} deg from previous direction, {offset * 100:.0f}cm) to {np.round(leg_target, 4)}")
+        print(f"[push] leg {i + 2} ({angle_deg:.0f} deg from previous direction, {offset * 100:.0f}cm, {(i + 1) * LEG_DEPTH_STEP_M * 100:.1f}cm deeper than the push) to {np.round(leg_target, 4)}")
         ur_left.move_linear_to_tcp_pose(leg_pose, linear_speed=MOVE_SPEED).wait()
-    ur_left.move_to_joint_configuration([ 0.06967844 ,-1.40953115 ,-1.61241627, -1.67278638 , 1.54791272 , 3.03650355])
+    # ur_left.move_to_joint_configuration([ 0.06967844 ,-1.40953115 ,-1.61241627, -1.67278638 , 1.54791272 , 3.03650355])
+    ur_left.move_to_joint_configuration(LEFT_HOME_JOINTS, joint_speed=LEFT_TRANSIT_JOINT_SPEED).wait()
 
     print("[done] opening motion finished")

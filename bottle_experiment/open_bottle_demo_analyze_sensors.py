@@ -2,10 +2,20 @@
 Bottle-opening demo: detect the lid touch point from the hover pose, move the gripper onto
 it, then push in a straight line toward the cap center to open the lid.
 
-Expected starting state (this script does NOT move to the start pose itself):
-  - ur_right holds the bottle (grasp matching DEFAULT_TCP_RIGHT_TO_BOTTLE),
-  - ur_left is already at the hover pose ~5cm above the bottle cap, camera facing the cap
-    (e.g. via calibrate_and_hover_bottle.py with HOVER_HEIGHT_METERS = 0.05).
+Expected starting state (both arms may be anywhere -- this script places them):
+  - ur_right holds the bottle with the grasp matching DEFAULT_TCP_RIGHT_TO_BOTTLE. Its pose is
+    no longer taught: the script drives ur_right through the "test" split's seeded bottle poses,
+    i.e. the same pose list collection and eval draw from (splits.py is imported, and
+    POSE_BLACKLIST[split] is passed through, so a blacklisted pose stays excluded here too).
+    That makes DEFAULT_TCP_RIGHT_TO_BOTTLE load-bearing -- the sampled poses are derived from
+    it, so a different grasp parks the cap somewhere other than where the plan expects it.
+  - ur_left is first moved to the retracted home joint configuration (LEFT_HOME_JOINTS,
+    the same opening transit the collection loop makes) and then driven to the hover pose
+    HOVER_HEIGHT_METERS above the cap, camera facing the cap.
+
+One calibration run per pose: the sensor stream is cut at episode boundaries, so every pose is
+saved as its own sensor_logs/run_NNNN.json, tagged with its split and pose slot. Between poses
+you close the cap by hand again, exactly as in the collection loop.
 
 Flow:
   1. grab a frame and run the touch-point detection;
@@ -29,13 +39,15 @@ Flow:
      height fixed;
   8. finally execute the LEGS list in order: each leg travels its offset at its angle
      counter-clockwise from the PREVIOUS leg's direction (the first is relative to the
-     push direction; 90 = perpendicular/left), all at the same height.
+     push direction; 90 = perpendicular/left), each descending LEG_DEPTH_STEP_M deeper below
+     the cap plane than the leg before it (0.0 = all at the same height).
 """
 
 import asyncio
 import json
 import os
 import struct
+import sys
 import threading
 import time
 
@@ -48,6 +60,7 @@ from airo_robots.manipulators.hardware.ur_rtde import URrtde
 from bleak import BleakClient, BleakScanner
 from calibrate_and_hover_bottle import (
     DEFAULT_TCP_RIGHT_TO_BOTTLE,
+    HOVER_HEIGHT_METERS,
     LEFT_ROBOT_IP,
     RIGHT_ROBOT_IP,
     compute_hover_pose_above_bottle,
@@ -57,8 +70,53 @@ from calibrate_and_hover_bottle import (
 )
 from camera_utils import freeze_auto_exposure
 from lid_touch_point_annotator import OUTPUT_DIR
+from motion_constants import (
+    APPROACH_OFFSET,
+    DEPTH_NUDGE_M,
+    GRIPPER_YAW_DEG,
+    LEGS,
+    LEG_DEPTH_STEP_M,
+    MAX_MOTION_RETRIES,
+    MOVE_SPEED,
+    OPEN_DWELL_S,
+    OPEN_POLL_S,
+    PUSH_OVERSHOOT,
+    PUSH_TARGET_TANGENTIAL_OFFSET,
+    RADIAL_OUTWARD_OFFSET,
+    RETRACT_LIFT_METERS,
+    STOP_LEGS_WHEN_OPEN,
+    TANGENTIAL_OFFSET,
+    YAW_SPEED,
+)
+from open_bottle_agent import (
+    LEFT_HOME_JOINTS,
+    LEFT_TRANSIT_JOINT_SPEED,
+    RANDOM_SEED,
+    RIGHT_JOINT_SPEED,
+    RIGHT_NEUTRAL_JOINTS,
+    generate_reachable_bottle_poses,
+)
 from open_bottle_demo import verify_or_correct_touch_point
 from touch_point_detector import detect_touch_point
+
+# This script is run with bottle_experiment/ as sys.path[0], so the repo root has to be added
+# explicitly to reach the package. splits.py is imported, never copied: a hand-maintained
+# duplicate of the seed offsets / pose counts / blacklists here would silently make this
+# script's "test pose 3" a different pose than collection's and eval's. The thresholds and
+# checkpoint map are imported from their canonical module for the same reason -- the recorder
+# must never judge the sensor by a different rule than the collector.
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+from robot_imitation_glue.hardware.bottle_sensor import (  # noqa: E402
+    PER_CHANNEL_THRESHOLDS,
+    SENSOR_CHECKPOINTS,
+)
+from robot_imitation_glue.ur5station.bottle.splits import (  # noqa: E402
+    POSE_BLACKLIST,
+    SPLIT_N_POSES,
+    SPLIT_SEED_OFFSETS,
+)
 
 # same BLE device/characteristic as instrumentation_ble_plot3.py
 SENSOR_DEVICE_NAME = "CaptainHook"
@@ -74,6 +132,11 @@ SENSOR_LOG_DIR = "/home/rtalwar/robot-imitation-glue/bottle_experiment/sensor_lo
 # move -- rejects transient noise from the move itself/gripper vibration, not a covered
 # vs. uncovered threshold (that needs to come from looking at real recorded data first).
 SENSOR_DEBOUNCE_WINDOW_S = 0.3
+# A dropped BLE link must read as "no data", never as the last value received. The stream is
+# ~48 Hz, so a newest sample older than this means notifications stopped -- and a stale number
+# is worse than None, because _check_checkpoint treats any reading as live (run_0016 lost its
+# link ~28 min before the motion and printed the identical frozen reading at all 6 events).
+SENSOR_STALE_AFTER_S = 2.0
 
 
 class SensorLogger:
@@ -98,6 +161,10 @@ class SensorLogger:
         self._connected = threading.Event()
         self._failed = threading.Event()
         self._stop_requested = threading.Event()
+        # sensor-clock time at which the current episode began; save() only writes samples and
+        # events from here on, so one run_NNNN.json is exactly one bottle pose. None = from the
+        # first sample ever taken (a single-episode session behaves as before).
+        self._episode_t0 = None
         self._thread = threading.Thread(target=lambda: asyncio.run(self._run()), daemon=True)
 
     def start(self, timeout=15.0):
@@ -156,77 +223,71 @@ class SensorLogger:
         print(f"[sensors] event '{name}' @ t={t:.2f}s reading={self.current_reading()}" if t is not None else f"[sensors] event '{name}' (no samples yet)")
 
     def current_reading(self, window_s=SENSOR_DEBOUNCE_WINDOW_S):
-        """Debounced [v0, v1, v2]: mean of samples within the last `window_s` seconds, or
-        None if nothing has arrived yet."""
+        """Debounced [v0, v1, v2]: mean of samples within the last `window_s` seconds.
+
+        None when nothing has arrived yet OR the stream has gone stale (SENSOR_STALE_AFTER_S), so
+        a dead link can never masquerade as a covered/uncovered reading.
+        """
         with self._lock:
             samples = list(self.samples)
-        if not samples:
+        if not samples or self._start_time is None:
             return None
         now = samples[-1][0]
+        if time.time() - self._start_time - now > SENSOR_STALE_AFTER_S:
+            return None
         recent = [s[1:] for s in samples if now - s[0] <= window_s]
         return list(np.mean(recent if recent else [samples[-1][1:]], axis=0))
 
-    def save(self, path):
+    def begin_episode(self):
+        """Start one bottle pose's recording window. The BLE thread is deliberately NOT
+        restarted -- the scan+connect is the slow part and has to survive all episodes -- this
+        only moves save()'s lower bound forward, so the dead time between poses (closing the cap
+        by hand, ur_right transiting) is not written into any run.
+
+        The caller must save() immediately after the episode's motion finishes, before calling
+        this again: the window's UPPER end is whenever save() runs, and that tail is exactly the
+        uncovered plateau derive_thresholds.py measures. Saving late would mix re-capped samples
+        into the plateau.
+        """
+        self._episode_t0 = (time.time() - self._start_time) if self._start_time is not None else None
+
+    def save(self, path, extra=None):
         with self._lock:
             samples = list(self.samples)
+        if self._episode_t0 is not None:
+            samples = [s for s in samples if s[0] >= self._episode_t0]
+            events = [e for e in self.events if e["time"] is None or e["time"] >= self._episode_t0]
+        else:
+            events = list(self.events)
+        payload = {"samples": samples, "events": events}
+        if extra:
+            payload.update(extra)
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "w") as f:
-            json.dump({"samples": samples, "events": self.events}, f)
-        print(f"[sensors] saved {len(samples)} samples, {len(self.events)} events to {path}")
+            json.dump(payload, f)
+        print(f"[sensors] saved {len(samples)} samples, {len(events)} events to {path}")
 
-APPROACH_OFFSET = -0.022  # metres above the grip point where the gripper stops (negative = press below the cap plane)
-RADIAL_OUTWARD_OFFSET = 0.01  # metres from the touch point radially outward (away from the cap center)
-# metres to the "left" of the touch point: along the cap-plane tangent at the touch point,
-# in the counter-clockwise direction about the cap's outward normal (the direction the old
-# circular motion went). Negate if "left" turns out to be the other way on the real bottle.
-TANGENTIAL_OFFSET = -0.04
-# metres to the "left" of the cap center (same tangential axis as TANGENTIAL_OFFSET):
-# the push line ends here instead of at the center itself
-PUSH_TARGET_TANGENTIAL_OFFSET = 0.30
-# metres to keep pushing past the push end point along the same line (0.0 = stop exactly
-# there; negative = stop short of it)
-PUSH_OVERSHOOT = -0.27
-# legs of the opening motion, executed in order after the push, each as
-# (angle_deg, offset_m). The angle is measured counter-clockwise about the cap's outward
-# normal RELATIVE TO THE PREVIOUS leg's direction (the first entry is relative to the
-# push direction; 90 = exactly perpendicular/"to the left"). The offset is the distance
-# travelled. All legs run in the cap plane at the pressed height. Add/remove/tune entries
-# freely -- the planned path preview, prints, and execution all follow this list.
-LEGS = [
-    (45.0, 0.03),  # second leg
-    (20.0, 0.06),  # third leg
-    (30.0, 0.04),  # fourth leg
-    (30.0, 0.03),  # fifth leg
-    (30.0, 0.01),  # fifth leg
-]
-# yaw of the gripper about its own TCP z-axis (which faces the cap), applied by rotating
-# in place BEFORE descending to the grip point. Defined relative to the touch-point ->
-# bottle-center axis: at 0 the gripper's x-axis points from the touch point toward the
-# center; positive rotates counter-clockwise about the cap's outward normal.
-GRIPPER_YAW_DEG = 90
-MOVE_SPEED = 0.05  # m/s, same slow speed as the annotation tool
+# --- checkpoint verification: OFF for calibration recording ------------------------------
+# A "failed" checkpoint retracts and presses DEPTH_NUDGE_M deeper, and that retry cascade
+# rewrites the very motion geometry the trace is meant to measure (run_0009's smeared leg
+# blocks). Calibration batches must therefore be single-pass: each constant runs exactly once
+# and the sensor stream is a clean read of the motion as specified. The retry machinery lives
+# in collect_data_bottle.py, where the demonstrations are actually collected -- this fork is a
+# recorder, not a collector. Judge the recorded runs offline:
+#   check_pop_phase.py sensor_logs/run_NNNN.json
+VERIFY_CHECKPOINTS = False
 
-# --- sensor-verified retry -------------------------------------------------------------
-# Each channel's own covered/uncovered voltage separation, derived from runs 0003/0005/0006
-# (the 3 runs under the current motion parameters -- 0000-0002 used a different sensor
-# layout and aren't comparable). S0's covered baseline has drifted up to ~3.11 across these
-# runs, leaving only ~0.13V margin to the lowest observed uncovered reading (3.24) -- re-check
-# if it drifts further. Kept in sync with robot_imitation_glue/hardware/bottle_sensor.py --
-# re-derive both together if the sensor mounting, cap, or LEGS geometry changes.
-PER_CHANNEL_THRESHOLDS = [3.17, 3.18, 3.00]  # S0, S1, S2, in volts
+# --- pose source -------------------------------------------------------------------------
+# Calibration runs are recorded on the seeded bottle poses of this split -- the same list
+# collect_data_bottle_opening and eval_bottle draw from (SPLIT_N_POSES["test"] is 5). The
+# blacklist comes from splits.py too, so a pose blacklisted for the split is skipped here as
+# well, and every other index keeps referring to the same pose it does during collection and
+# evaluation, because all three use RANDOM_SEED + SPLIT_SEED_OFFSETS[split] as their stream.
+POSE_SPLIT = "test"
 
-# Which sensor channel (index into PER_CHANNEL_THRESHOLDS) must be uncovered by each named
-# checkpoint of the opening motion, per runs 0003/0005/0006: S0 pops open on the initial push
-# (before any leg), S1 by leg_3, S2 by leg_6. Kept in sync with
-# robot_imitation_glue/hardware/bottle_sensor.py.
-SENSOR_CHECKPOINTS = {
-    "push_end": [0],
-    "leg_3_end": [1],
-    "leg_6_end": [2],
-}
-
-DEPTH_NUDGE_M = 0.003  # metres to press deeper per retry attempt, along -cap_normal
-MAX_MOTION_RETRIES = 3  # how many times to retract and redo the whole push+legs motion
+# PER_CHANNEL_THRESHOLDS, SENSOR_CHECKPOINTS: imported from their canonical module
+# (robot_imitation_glue/hardware/bottle_sensor.py) just above -- derivation history and the
+# full rationale for both live there, next to the numbers themselves.
 
 
 def _check_checkpoint(sensor_logger, event_name):
@@ -256,13 +317,38 @@ def _check_checkpoint(sensor_logger, event_name):
     return False
 
 
+def _cap_is_open_sustained(sensor_logger, dwell_s=OPEN_DWELL_S):
+    """True only if all three channels hold at/above their threshold for `dwell_s` straight.
+
+    The dwell is the point: run_0017's S2 rose for ~1.2 s and then fell back as the later legs
+    pressed the loose cap down again, which one debounced reading would have called open. A None
+    reading means the BLE stream has gone stale (see SENSOR_STALE_AFTER_S) and raises rather than
+    returning False -- a dead link must not silently disable the skip, and run_0016 is what that
+    looked like when current_reading() still returned frozen values.
+    """
+    deadline = time.monotonic() + dwell_s
+    while True:
+        reading = sensor_logger.current_reading()
+        if reading is None:
+            raise RuntimeError(
+                "cap-sensor stream is stale or disconnected -- cannot tell whether the cap is open; "
+                "stop-on-open and the checkpoints are both meaningless against a dead link."
+            )
+        if not all(reading[c] >= PER_CHANNEL_THRESHOLDS[c] for c in range(len(PER_CHANNEL_THRESHOLDS))):
+            return False
+        if time.monotonic() >= deadline:
+            return True
+        time.sleep(OPEN_POLL_S)
+
+
 def _build_motion_segments(ur_left, sensor_logger, yawed_rotation, hover_position, approach_position, push_target, leg_targets):
     """The motion as an ordered list of (label, execute_fn, checkpoint_event_or_None).
     execute_fn(depth_offset) performs that segment's move(s) -- possibly deeper than
     originally planned -- and returns the pose reached.
 
     Segment order: approach (yaw+descend, ungated) -> push (push_end) -> leg2 (ungated) ->
-    leg3 (leg_3_end) -> leg4 (ungated) -> leg5 (ungated) -> leg6 (leg_6_end).
+    leg3 (leg_3_end) -> leg4..leg6 (ungated). Checkpoints exist only for the events named in
+    SENSOR_CHECKPOINTS, so the push segment is ungated under the current map.
     """
 
     def do_approach(depth_offset):
@@ -272,7 +358,7 @@ def _build_motion_segments(ur_left, sensor_logger, yawed_rotation, hover_positio
         yaw_pose[:3, :3] = yawed_rotation
         yaw_pose[:3, 3] = hover_position
         print(f"[move] yawing gripper to {GRIPPER_YAW_DEG:.0f} deg relative to the touch->center axis")
-        ur_left.move_linear_to_tcp_pose(yaw_pose, linear_speed=MOVE_SPEED).wait()
+        ur_left.move_linear_to_tcp_pose(yaw_pose, linear_speed=YAW_SPEED).wait()
 
         approach_pose = np.eye(4)
         approach_pose[:3, :3] = yawed_rotation
@@ -297,16 +383,22 @@ def _build_motion_segments(ur_left, sensor_logger, yawed_rotation, hover_positio
             leg_pose = np.eye(4)
             leg_pose[:3, :3] = yawed_rotation
             leg_pose[:3, 3] = leg_target + depth_offset
-            print(f"[push] leg {leg_number} ({angle_deg:.0f} deg from previous direction, {offset * 100:.0f}cm) to {np.round(leg_pose[:3, 3], 4)}")
+            print(f"[push] leg {leg_number} ({angle_deg:.0f} deg from previous direction, {offset * 100:.0f}cm, {(leg_number - 1) * LEG_DEPTH_STEP_M * 100:.1f}cm deeper than the push) to {np.round(leg_pose[:3, 3], 4)}")
             ur_left.move_linear_to_tcp_pose(leg_pose, linear_speed=MOVE_SPEED).wait()
             sensor_logger.log_event(event_name, leg_index=leg_number, angle_deg=angle_deg, offset_m=offset, target=leg_pose[:3, 3].tolist())
             return leg_pose
         return do_leg
 
-    segments = [("approach", do_approach, None), ("push", do_push, "push_end")]
+    # gated only if it is actually in the checkpoint map -- otherwise the segment counts as a
+    # checkpoint to _previous_checkpoint_segment_index while _check_checkpoint returns None for it,
+    # which makes every recovery look like "the earlier checkpoint also failed" and forces a full
+    # restart instead of resuming from the last good leg.
+    push_ckpt = "push_end" if (VERIFY_CHECKPOINTS and "push_end" in SENSOR_CHECKPOINTS) else None
+    segments = [("approach", do_approach, None), ("push", do_push, push_ckpt)]
     for i, ((angle_deg, offset), leg_target) in enumerate(zip(LEGS, leg_targets)):
         event_name = f"leg_{i + 2}_end"
-        checkpoint = event_name if event_name in SENSOR_CHECKPOINTS else None
+        gated = VERIFY_CHECKPOINTS and event_name in SENSOR_CHECKPOINTS
+        checkpoint = event_name if gated else None
         segments.append((f"leg{i + 2}", make_do_leg(i + 2, angle_deg, offset, leg_target, event_name), checkpoint))
     return segments
 
@@ -324,7 +416,7 @@ def run_opening_motion_with_retry(
     approach_position, push_target, leg_targets, cap_normal,
 ):
     """Execute the yaw + descend + push + LEGS motion, gated by sensor-verified checkpoints
-    (push_end, leg_3_end, leg_6_end -- see SENSOR_CHECKPOINTS), pressing DEPTH_NUDGE_M
+    (leg_2_end, leg_3_end -- see SENSOR_CHECKPOINTS), pressing DEPTH_NUDGE_M
     deeper into the cap on every retry (an identical replay would very likely just fail
     identically) -- up to MAX_MOTION_RETRIES times.
 
@@ -335,11 +427,11 @@ def run_opening_motion_with_retry(
         before it (they're still fine, no need to redo them).
       - If the earlier checkpoint has ALSO lost its grip, the problem runs deeper than just
         this leg -- restart the whole motion from the grip point.
-      - The first checkpoint (push_end) has no earlier checkpoint to fall back on, so its
+      - The first checkpoint (leg_2_end) has no earlier checkpoint to fall back on, so its
         failure always triggers a full restart.
 
-    Returns True once leg_6_end -- the checkpoint for the last channel to uncover -- passes,
-    False if MAX_MOTION_RETRIES is exhausted first.
+    Returns True once leg_3_end -- the checkpoint gating the last channels to uncover (S1 and S2)
+    -- passes, False if MAX_MOTION_RETRIES is exhausted first.
     """
     segments = _build_motion_segments(ur_left, sensor_logger, yawed_rotation, hover_position, approach_position, push_target, leg_targets)
 
@@ -356,12 +448,27 @@ def run_opening_motion_with_retry(
             )
 
         checkpoint_failed_index = None
+        stopped_open = False
+        reached = None
         for segment_index in range(resume_index, len(segments)):
             label, execute_fn, checkpoint_name = segments[segment_index]
-            execute_fn(depth_offset)
+            reached = execute_fn(depth_offset)
 
             if segment_index == 0 and attempt == 0:
                 input("Press Enter to start the opening motion (Ctrl+C to abort)...")
+
+            # Same rule as collect_data_bottle: once every channel holds open, the rest of the leg
+            # chain is post-open travel, so skip it and lift off. Checked before the gate because a
+            # passing gate is implied by it, and cheap because the poll returns on its first read
+            # while any channel is still covered.
+            # STOP_LEGS_WHEN_OPEN stays effective even with VERIFY_CHECKPOINTS off: skipping
+            # provably post-open travel does not rewrite the geometry the way a deeper retry does.
+            if STOP_LEGS_WHEN_OPEN and _cap_is_open_sustained(sensor_logger):
+                stopped_open = True
+                skipped = len(segments) - segment_index - 1
+                sensor_logger.log_event("stop_on_open", after_segment=label, skipped_segments=skipped)
+                print(f"[verify] cap fully open after '{label}' -- skipping the remaining {skipped} segment(s)")
+                break
 
             if checkpoint_name is None:
                 continue
@@ -369,6 +476,18 @@ def run_opening_motion_with_retry(
             if checkpoint_ok is False:
                 checkpoint_failed_index = segment_index
                 break
+
+        if stopped_open:
+            # Lift off the cap the way the collector does -- the gripper sits APPROACH_OFFSET below
+            # the cap plane, so ending the motion early still has to disengage it before anything
+            # else can be read or recorded.
+            lift_pose = np.eye(4)
+            lift_pose[:3, :3] = yawed_rotation
+            lift_pose[:3, 3] = reached[:3, 3] + RETRACT_LIFT_METERS * cap_normal
+            print(f"[move] lifting {RETRACT_LIFT_METERS * 100:.0f}cm off the cap")
+            ur_left.move_linear_to_tcp_pose(lift_pose, linear_speed=MOVE_SPEED).wait()
+            sensor_logger.log_event("retreat_lift", target=lift_pose[:3, 3].tolist())
+            return True
 
         if checkpoint_failed_index is None:
             return True
@@ -457,26 +576,37 @@ def save_touch_point_sample(image_bgr, overlay, hover_height, click_xy, detected
     print(f"[dataset] saved {prefix}  height={hover_height:.3f}  click={click_xy}  detected={detected_xy}")
 
 
-def _main_body(sensor_logger):
-    # 720p to match touch_point_detector's radius prior (calibrated on 720p frames);
-    # intrinsics_matrix() returns the intrinsics for this stream resolution.
-    camera = Realsense(resolution=Realsense.RESOLUTION_720, fps=15, enable_depth=False, enable_pointcloud=False)
-    freeze_auto_exposure(camera)
-    intrinsics = camera.intrinsics_matrix()
-    ur_left = URrtde(ip_address=LEFT_ROBOT_IP)
-    # ur_left.move_to_joint_configuration([ 0.06967844 ,-1.40953115 ,-1.61241627, -1.67278638 , 1.54791272 , 3.03650355],joint_speed=0.02).wait()
-    # time.sleep(2)
-    ur_right = URrtde(ip_address=RIGHT_ROBOT_IP)
-    ur_right.rtde_control.teachMode()
-    input("Move the right arm where ever you want")
-    ur_right.rtde_control.endTeachMode()
+def _run_episode(sensor_logger, camera, intrinsics, ur_left, ur_right, tcp_right_pose, meta):
+    """One calibration run on one bottle pose: place the bottle, hover, detect + verify the
+    touch point, then execute the opening motion while the sensor stream is recorded.
+
+    The achieved cap pose is re-derived from ur_right's kinematics after the move (never the
+    sampled one), so the plan follows the arm's actual stopping position.
+    """
+    slot, total = meta["pose_slot"], meta["n_poses"]
+    if tcp_right_pose is not None:
+        # The collector's transit: via the neutral joint configuration rather than straight from
+        # the previous pose, because is_tcp_pose_reachable checks endpoints only, never the path
+        # between them -- a direct pose-to-pose move can sweep through the other arm or the table
+        # even when both endpoints are individually fine.
+        input(f"[pose {slot}/{total}] close the cap by hand, then press Enter to move the RIGHT arm to this pose (Ctrl+C to abort)...")
+        print(f"[move] ur_right to the neutral pose, then to bottle pose {slot}/{total}")
+        ur_right.move_to_joint_configuration(RIGHT_NEUTRAL_JOINTS, joint_speed=RIGHT_JOINT_SPEED).wait()
+        ur_right.move_to_tcp_pose(tcp_right_pose, joint_speed=RIGHT_JOINT_SPEED).wait()
+    # The episode window opens HERE, not in the driver: begin_episode in the driver would start
+    # the clock while the PREVIOUS pose's cap is still open, and derive_thresholds.py takes each
+    # run's covered baseline from the first 2 s of its window -- it would read the previous run's
+    # uncovered plateau as this run's closed state and report every channel as never opened
+    # (which is exactly what happened to run_0014/0015/0016).
+    sensor_logger.begin_episode()
+    sensor_logger.log_event("pose_start", **meta)
 
     cap_pose = get_bottle_cap_pose_in_base_left(DEFAULT_TCP_RIGHT_TO_BOTTLE, ur_right)
-    hover_pose = compute_hover_pose_above_bottle(cap_pose, 0.1)
+    hover_pose = compute_hover_pose_above_bottle(cap_pose)
     print(f"hover pose: {hover_pose}")
     print(f"Moving ur_left above the bottle cap at {hover_pose[:3, 3]}")
 
-    ur_left.move_to_tcp_pose(hover_pose, joint_speed=0.05).wait()
+    ur_left.move_to_tcp_pose(hover_pose, joint_speed=0.1).wait()
     time.sleep(1)
     sensor_logger.log_event("hover_reached")
     cap_center = cap_pose[:3, 3]
@@ -486,9 +616,9 @@ def _main_body(sensor_logger):
     camera_pose_in_base = start_pose @ tcp_left_to_camera
 
     # actual height of the TCP above the cap plane -- the radius prior needs this, and it
-    # should be ~0.05 if the robot is at the expected start pose.
+    # should be ~HOVER_HEIGHT_METERS if the robot is at the expected start pose.
     hover_height = float(cap_normal.dot(start_pose[:3, 3] - cap_center))
-    print(f"[start] TCP is {hover_height * 100:.1f}cm above the cap plane (expected ~5cm)")
+    print(f"[start] TCP is {hover_height * 100:.1f}cm above the cap plane (expected ~{HOVER_HEIGHT_METERS * 100:.0f}cm)")
 
     image_rgb = camera.get_rgb_image_as_int()
     image_bgr = ImageConverter.from_numpy_int_format(image_rgb).image_in_opencv_format
@@ -535,9 +665,9 @@ def _main_body(sensor_logger):
     push_target = push_end + APPROACH_OFFSET * cap_normal + PUSH_OVERSHOOT * push_direction
 
     # legs after the push: each direction is the previous leg's direction rotated by the
-    # leg's angle counter-clockwise about the cap normal, all in the cap plane at the
-    # pressed height. leg_ends are the cap-plane points (for the image preview),
-    # leg_targets the pressed-height points the robot actually moves to.
+    # leg's angle counter-clockwise about the cap normal, and each leg ends LEG_DEPTH_STEP_M
+    # deeper than the previous one. leg_ends are the cap-plane points (for the image preview),
+    # leg_targets the actually-descending points the robot moves to.
     leg_ends, leg_targets = [], []
     leg_direction = push_direction
     leg_end, leg_target = push_end, push_target
@@ -546,7 +676,7 @@ def _main_body(sensor_logger):
         leg_direction -= cap_normal * cap_normal.dot(leg_direction)  # keep exactly in-plane
         leg_direction /= np.linalg.norm(leg_direction)
         leg_end = leg_end + offset * leg_direction
-        leg_target = leg_target + offset * leg_direction
+        leg_target = leg_target + offset * leg_direction - LEG_DEPTH_STEP_M * cap_normal
         leg_ends.append(leg_end)
         leg_targets.append(leg_target)
 
@@ -582,16 +712,76 @@ def _main_body(sensor_logger):
         ur_left, sensor_logger, hover_pose, yawed_rotation, start_pose[:3, 3],
         approach_position, push_target, leg_targets, cap_normal,
     )
-    print(f"[done] opening motion {'succeeded' if opened else 'FAILED'}")
+    if VERIFY_CHECKPOINTS:
+        print(f"[done] opening motion {'succeeded' if opened else 'FAILED'}")
+    else:
+        print("[done] opening motion executed once (checkpoint verification OFF -- judge with"
+              " check_pop_phase.py on the saved run)")
 
     # .wait() so the retreat completes BEFORE save(): the cap is still open during it, and those
     # seconds are exactly the uncovered plateau derive_thresholds.py needs (without it the stream
     # ends at leg_6_end and the S2 plateau is a handful of samples).
-    ur_left.move_to_joint_configuration([ 0.06967844 ,-1.40953115 ,-1.61241627, -1.67278638 , 1.54791272 , 3.03650355]).wait()
+    # ur_left.move_to_joint_configuration([ 0.06967844 ,-1.40953115 ,-1.61241627, -1.67278638 , 1.54791272 , 3.03650355]).wait()
+    ur_left.move_to_joint_configuration(LEFT_HOME_JOINTS, joint_speed=LEFT_TRANSIT_JOINT_SPEED).wait()
+
     sensor_logger.log_event("retreat_home")
 
-    run_index = len([n for n in os.listdir(SENSOR_LOG_DIR) if n.endswith(".json")]) if os.path.isdir(SENSOR_LOG_DIR) else 0
-    sensor_logger.save(os.path.join(SENSOR_LOG_DIR, f"run_{run_index:04d}.json"))
+
+def _main_body(sensor_logger):
+    """Record one calibration run per pose of the POSE_SPLIT split.
+
+    The pose list is built by exactly the call collect_data_bottle_opening makes -- same
+    RANDOM_SEED + SPLIT_SEED_OFFSETS[POSE_SPLIT] stream, same generate_reachable_bottle_poses
+    reachability constraints, same POSE_BLACKLIST[POSE_SPLIT] -- so the thresholds this feeds are
+    derived on the poses the policies are actually evaluated under, instead of on one
+    hand-taught pose, and the split's blacklisted pose is skipped here too.
+    """
+    # 720p to match touch_point_detector's radius prior (calibrated on 720p frames);
+    # intrinsics_matrix() returns the intrinsics for this stream resolution.
+    camera = Realsense(resolution=Realsense.RESOLUTION_720, fps=15, enable_depth=False, enable_pointcloud=False)
+    freeze_auto_exposure(camera)
+    intrinsics = camera.intrinsics_matrix()
+    ur_left = URrtde(ip_address=LEFT_ROBOT_IP)
+    # Same opening move as the collection loop: retreat ur_left to the known home joint
+    # configuration first, so the hover move below always reaches the cap from one
+    # configuration instead of wherever the previous session left the arm (move_to_tcp_pose
+    # picks its own path; the home transit makes it reproducible).
+    input("Press Enter to move the LEFT arm to the retracted home pose (Ctrl+C to abort)...")
+    print("[move] retreating ur_left home")
+    ur_left.move_to_joint_configuration(LEFT_HOME_JOINTS, joint_speed=LEFT_TRANSIT_JOINT_SPEED).wait()
+    ur_right = URrtde(ip_address=RIGHT_ROBOT_IP)
+
+    input(
+        f"Mount the bottle in ur_right with the grasp matching DEFAULT_TCP_RIGHT_TO_BOTTLE and the "
+        f"cap closed -- ur_right is now DRIVEN to sampled poses derived from that constant rather "
+        f"than taught, so a different grasp puts the cap somewhere the plan does not expect. "
+        f"Press Enter to generate the '{POSE_SPLIT}' split's {SPLIT_N_POSES[POSE_SPLIT]} poses."
+    )
+    rng = np.random.default_rng(RANDOM_SEED + SPLIT_SEED_OFFSETS[POSE_SPLIT])
+    bottle_poses = generate_reachable_bottle_poses(
+        SPLIT_N_POSES[POSE_SPLIT], ur_left, ur_right, rng, blacklist=POSE_BLACKLIST[POSE_SPLIT]
+    )
+    if not bottle_poses:
+        raise SystemExit(f"[generate] no reachable poses for split '{POSE_SPLIT}' -- nothing to calibrate")
+    print(f"[generate] recording {len(bottle_poses)} calibration runs, one per '{POSE_SPLIT}' pose")
+
+    for slot, (tcp_right_pose, planned_cap_pose) in enumerate(bottle_poses, start=1):
+        meta = {
+            "split": POSE_SPLIT,
+            "pose_slot": slot,
+            "n_poses": len(bottle_poses),
+            # 1-based position within the ACCEPTED list -- the numbering collect_data_bottle.py and
+            # eval_bottle.py index bottle_poses by. generate_reachable_bottle_poses does not return
+            # its internal index (the one that counts blacklisted poses), so it is not recorded.
+            "planned_cap_center": planned_cap_pose[:3, 3].tolist(),
+        }
+        print(f"\n=== calibration run {slot}/{len(bottle_poses)}: '{POSE_SPLIT}' pose {slot} ===")
+        _run_episode(sensor_logger, camera, intrinsics, ur_left, ur_right, tcp_right_pose, meta)
+        # Saved immediately after the retreat: this window's tail is the uncovered plateau
+        # derive_thresholds.py needs (see begin_episode). Index = number of existing runs, so the
+        # 5 poses land in consecutive files.
+        run_index = len([n for n in os.listdir(SENSOR_LOG_DIR) if n.endswith(".json")]) if os.path.isdir(SENSOR_LOG_DIR) else 0
+        sensor_logger.save(os.path.join(SENSOR_LOG_DIR, f"run_{run_index:04d}.json"), extra=meta)
 
 
 if __name__ == "__main__":

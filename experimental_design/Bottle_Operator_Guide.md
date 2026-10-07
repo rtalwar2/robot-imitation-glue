@@ -31,10 +31,11 @@ inference, so the deployed policy needs no sensor hardware.
 — the guide's former step 5 (per-level design-A pretraining via `train_ast_bottle.py`) is gone; that
 script stays on disk for the button-experiment lineage, but nothing here runs it.
 
-> ⚠️ **Rebaseline in progress.** The demonstration set is being recollected and the cap-sensor
-> covered/uncovered thresholds recalibrated. Every number below that was derived from the old data —
-> **N=51, median duration 31.1 s, timeout 65 s, the screening scores** — is **provisional until
-> re-derived**. Steps 0–2 are the gate: never train curve policies on pre-recalibration datasets.
+> ⚠️ **Rebaseline in progress.** The cap-sensor thresholds are **recalibrated** (2026-10-07, step 0);
+> the demonstration set is still being **recollected** under them. Every number below derived from the
+> old data — **N=51, median duration 31.1 s, timeout 65 s, the screening scores** — is **provisional
+> until re-derived**. Steps 1–2 are the remaining gate: never train curve policies on pre-recalibration
+> datasets.
 
 ---
 
@@ -43,16 +44,19 @@ script stays on disk for the button-experiment lineage, but nothing here runs it
 - [ ] **UR payload compensation** on the left arm: with nothing in contact, jog through the task's
   orientations and watch `ft` in rerun. Near-constant → OK. Swinging by newtons → fix the payload
   mass/CoG in the UR controller before collecting; no baseline subtraction can rescue it.
-- [ ] **Recalibrate the sensor constants** (`hardware/bottle_sensor.py`, `PER_CHANNEL_THRESHOLDS` —
-  currently 3.17/3.18/3.00 V). The live values derive from
-  `bottle_experiment/sensor_logs/run_{0003,0005,0006}.json`, recorded under the *previous* sensor
-  layout. Take fresh covered/uncovered readings for the current cap and mounting, re-derive
-  `PER_CHANNEL_THRESHOLDS` **and** `CALIBRATED_RANGE` from the same new run set, and confirm the
-  collection checkpoints (`SENSOR_CHECKPOINTS`) still line up with the motion. Everything is
-  labelled and scored against these constants — this is the gate for the recollection in step 1.
+- [x] ~~**Recalibrate the sensor constants**~~ **Done (2026-10-07).** `PER_CHANNEL_THRESHOLDS` is
+  **3.16/3.12/3.08 V** and `CALIBRATED_RANGE` was re-derived with it, both from the calibration
+  batch `sensor_logs/run_{0013,0018,0020,0021,0022,0023}.json` recorded with
+  `open_bottle_demo_analyze_sensors.py` (it now drives ur_right through the "test" split's seeded
+  poses and saves one run per pose) and derived with `derive_thresholds.py` — the tool prints the
+  paste-ready pair. `SENSOR_CHECKPOINTS` was re-mapped in the same pass to where the channels
+  actually cross (`leg_2_end`→S0, `leg_3_end`→S1+S2); the collector's success gate is now resolved
+  by position, so a future re-map cannot silently kill the label. **To redo after any future
+  remount/re-tune:** re-record the batch, re-run the tool, move both constants together
+  (`bottle_sensor.py` + `train_ast_bottle.py`) — every other runner imports them.
 - [ ] **Stickers**: cap sensor voltages unchanged with stickers on (read a fully-open and
-  fully-closed cap per appearance), and the sticker is visible in the wrist frame. Re-confirm after
-  the recalibration above, not before.
+  fully-closed cap per appearance, against the new thresholds), and the sticker is visible in the
+  wrist frame. This is the last outstanding step-0 item before the recollection.
 - [ ] **Sensor feeds running**: `bottle_ble_reader.py` (cap sensor → DDS topic `Bottle`) and the
   Kaldi spectrogram publisher (`KaldiSpectrogram`). The collection loop hard-fails on a dead cap
   sensor, but only at the first checkpoint — start them first.

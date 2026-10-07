@@ -51,15 +51,18 @@ from calibrate_and_hover_bottle import (
     tcp_left_to_camera,
 )
 from camera_utils import freeze_auto_exposure
-from open_bottle_demo import (
+from motion_constants import (
     APPROACH_OFFSET,
     GRIPPER_YAW_DEG,
     LEGS,
+    LEG_DEPTH_STEP_M,
     MOVE_SPEED,
     PUSH_OVERSHOOT,
     PUSH_TARGET_TANGENTIAL_OFFSET,
     RADIAL_OUTWARD_OFFSET,
     TANGENTIAL_OFFSET,
+)
+from open_bottle_demo import (
     compute_yawed_gripper_orientation,
     pixel_to_point_on_cap_plane,
     project_point_to_pixel,
@@ -141,7 +144,7 @@ def plan_opening_motion(cap_pose, touch_point):
         leg_direction -= cap_normal * cap_normal.dot(leg_direction)
         leg_direction /= np.linalg.norm(leg_direction)
         leg_end = leg_end + offset * leg_direction
-        leg_target = leg_target + offset * leg_direction
+        leg_target = leg_target + offset * leg_direction - LEG_DEPTH_STEP_M * cap_normal
         leg_ends.append(leg_end)
         leg_targets.append(leg_target)
 
