@@ -63,6 +63,12 @@ from touch_point_detector import detect_touch_point
 # same BLE device/characteristic as instrumentation_ble_plot3.py
 SENSOR_DEVICE_NAME = "CaptainHook"
 SENSOR_CHARACTERISTIC_UUID = "1A3AC130-31EE-758A-BC50-54A61958EF81"
+# The cap sensor is only reached over the external USB dongle (hci1, Realtek 0bda:8771); the
+# board's internal adapter (hci0, Intel 8087:0033) has too little range at the bench -- the same
+# split SensorCommDDS pins in bottle_ble_reader.py. This must be named explicitly: bleak's
+# default adapter is the first powered one in the iteration order of a *set*, so leaving it out
+# makes the choice depend on PYTHONHASHSEED and flips to hci0 on roughly half of all runs.
+SENSOR_HCI_ADAPTER = "hci1"
 SENSOR_LOG_DIR = "/home/rtalwar/robot-imitation-glue/bottle_experiment/sensor_logs"
 # how far back (seconds) to average when reading the "current" sensor state right after a
 # move -- rejects transient noise from the move itself/gripper vibration, not a covered
@@ -74,14 +80,17 @@ class SensorLogger:
     """Background BLE reader for the 3-channel cap sensor, logging a continuous time
     series plus timestamped event markers (leg boundaries, etc.) for later analysis.
 
-    Connects on a background thread (bleak needs its own asyncio loop) exactly like
-    instrumentation_ble_plot3.py; call start() and wait for it to report connected before
-    moving the robot, so no samples are missed at the beginning of the motion.
+    Connects on a background thread (bleak needs its own asyncio loop) like
+    instrumentation_ble_plot3.py -- except that the scan is pinned to SENSOR_HCI_ADAPTER here,
+    since the sensor is only in range of the external dongle. Call start() and wait for it to
+    report connected before moving the robot, so no samples are missed at the beginning of the
+    motion.
     """
 
-    def __init__(self, device_name=SENSOR_DEVICE_NAME, characteristic_uuid=SENSOR_CHARACTERISTIC_UUID):
+    def __init__(self, device_name=SENSOR_DEVICE_NAME, characteristic_uuid=SENSOR_CHARACTERISTIC_UUID, hci_adapter=SENSOR_HCI_ADAPTER):
         self.device_name = device_name
         self.characteristic_uuid = characteristic_uuid
+        self.hci_adapter = hci_adapter
         self.samples = []  # list of [t, v0, v1, v2]
         self.events = []  # list of {"time": t, "name": ..., **extra}
         self._lock = threading.Lock()
@@ -94,8 +103,8 @@ class SensorLogger:
     def start(self, timeout=15.0):
         self._thread.start()
         if not self._connected.wait(timeout=timeout) or self._failed.is_set():
-            raise RuntimeError(f"Could not connect to sensor device '{self.device_name}' within {timeout}s")
-        print(f"[sensors] connected to '{self.device_name}', logging started")
+            raise RuntimeError(f"Could not connect to sensor device '{self.device_name}' on {self.hci_adapter} within {timeout}s")
+        print(f"[sensors] connected to '{self.device_name}' on {self.hci_adapter}, logging started")
 
     def stop(self, timeout=5.0):
         """Signal the background BLE thread to unsubscribe and disconnect gracefully (like
@@ -112,9 +121,9 @@ class SensorLogger:
             def _matches_device_name(scanned_device, advertisement_data):
                 return scanned_device.name == self.device_name
 
-            device = await BleakScanner.find_device_by_filter(_matches_device_name, timeout=10.0)
+            device = await BleakScanner.find_device_by_filter(_matches_device_name, timeout=10.0, bluez={"adapter": self.hci_adapter})
             if device is None:
-                print(f"[sensors] device '{self.device_name}' not found")
+                print(f"[sensors] device '{self.device_name}' not found on {self.hci_adapter}")
                 self._failed.set()
                 self._connected.set()
                 return
