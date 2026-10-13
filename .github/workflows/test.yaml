@@ -1,0 +1,27 @@
+# Runs the test suite. Kept separate from the format job in pre-commit.yaml.
+
+name: Test
+
+on: push # run always
+
+jobs:
+  pytest:
+    name: Pytest
+    runs-on: ubuntu-latest
+    steps:
+    # No submodules on purpose: test/ imports nothing from them and every
+    # submodule package sits behind an optional extra, so `uv sync` (without
+    # extras) resolves and installs without checking them out.
+    - uses: actions/checkout@v4
+
+    - uses: astral-sh/setup-uv@v5
+      with:
+        enable-cache: true
+
+    # --frozen, not --locked: checking the lock is up to date would make uv read
+    # the metadata of the editable submodule packages, which are not checked out.
+    - name: Install project
+      run: uv sync --frozen
+
+    - name: Run tests
+      run: uv run --frozen pytest test/
