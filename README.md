@@ -32,6 +32,11 @@ The code is written modularly so that you can easily:
 ![](docs/action-flow.png)
 
 
+## Documentation
+
+- [Debugging best practices](docs/debugging.md): replaying episodes, running inference offline, hardware-free testing with the mock env, dataset utilities and the common pitfalls.
+
+
 ## Examples
 
 2 examples are available of how to integrate this codebase for your robot.
@@ -46,8 +51,25 @@ Both are powered using our airo-mono repo, but you can freely select a control s
 
 ### installation
 
-- clone this repo
-- initialize and update submodules: `git submodule update --init`
-- create the conda environment `conda env create -f environment.yaml`
+We use [uv](https://docs.astral.sh/uv/) for dependency management.
+
+- clone this repo with its submodules: `git clone --recurse-submodules git@github.com:airo-ugent/robot-imitation-glue.git`
+  (already cloned? `git submodule update --init`)
+- create the environment: `uv sync --all-extras`
+- run anything in it with `uv run <cmd>`, e.g. `uv run pytest test/`
+
+Everything that lives in a submodule, and everything that is heavy or hardware-only, is an
+optional extra, so you can install only what you need instead of `--all-extras`:
+
+| extra | contents |
+| --- | --- |
+| `airo` | vendored `airo-ipc` + `airo-mono` packages (typing, dataset-tools, spatial-algebra, camera-toolkit, robots) |
+| `lerobot` | vendored `lerobot` fork: dataset recording/replay and the lerobot agents |
+| `teleop` | vendored `airo-teleop` packages: teleop devices (Gello, SpaceMouse, phone) and their agents |
+| `baseline` | `torch` / `torchvision`, for policies that run in-process |
+| `hardware` | vendor SDKs of the UR3/UR5 stations (RealSense, Schunk, Dynamixel, SpaceMouse, UR IK) |
+| `remote-policy` | client for policies served over HTTP (OpenVLA) |
+
+A bare `uv sync` (no extras) needs no submodule checkout; that is what CI uses to run the tests.
 
 

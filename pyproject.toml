@@ -1,0 +1,80 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "robot-imitation-glue"
+version = "0.0.1"
+description = "Framework to reduce engineering efforts in using imitation learning for robot manipulation."
+readme = "README.md"
+authors = [{ name = "Thomas Lips", email = "thomas17.lips@gmail.com" }]
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "click",
+    "loguru",
+    "numpy",
+    "opencv-python", # GUI build: collect_data.py / eval_agent.py call cv2.imshow
+    "pynput",
+    "rerun-sdk",
+    "scipy",
+    "tqdm",
+]
+
+# Everything that lives in a git submodule, and every heavy or hardware-only wheel,
+# is an extra. That keeps a bare `uv sync` (CI, linting, glue-code development)
+# free of submodule checkouts, CUDA wheels and vendor SDKs.
+[project.optional-dependencies]
+# vendored airo-mono / airo-ipc packages (see [tool.uv.sources])
+airo = [
+    "airo-ipc",
+    "airo-typing",
+    "airo-dataset-tools",
+    "airo-spatial-algebra",
+    "airo-camera-toolkit",
+    "airo-robots",
+]
+# vendored lerobot fork: dataset recording/replay and the lerobot agents
+lerobot = ["lerobot"]
+# vendored airo-teleop packages: teleop devices (Gello, SpaceMouse, phone) and their agents
+teleop = ["airo-teleop-devices", "airo-teleop-agents"]
+# learned policies that run in-process (baseline policy, eval_*_lerobot scripts)
+baseline = ["torch", "torchvision"]
+# vendor SDKs for the concrete hardware of the UR3/UR5 stations
+hardware = [
+    "bkstools", # also provides the `pyschunk` module
+    "dynamixel-sdk",
+    "pyrealsense2",
+    "pyspacemouse",
+    "ur-analytic-ik",
+]
+# client for policies served over HTTP (OpenVLA).
+# `openpi-client` (agents/openpi_agent.py) is deliberately NOT listed: every published
+# version pins numpy<2 while all airo packages require numpy>=2, so pi0 evaluation
+# needs its own environment. Install it there with `uv pip install openpi-client`.
+remote-policy = ["json-numpy", "pillow", "requests"]
+
+[tool.setuptools.packages.find]
+include = ["robot_imitation_glue*"]
+
+[tool.uv]
+# airo-robots -> airo-tulip over-pins pyzmq==26.0.3, lerobot needs pyzmq>=26.2.1.
+# Both work on 26.2.x, so relax the pin instead of dropping one of the two extras.
+override-dependencies = ["pyzmq>=26.2.1"]
+
+[tool.uv.sources]
+airo-ipc = { path = "airo-ipc", editable = true }
+airo-typing = { path = "airo-mono/airo-typing", editable = true }
+airo-dataset-tools = { path = "airo-mono/airo-dataset-tools", editable = true }
+airo-spatial-algebra = { path = "airo-mono/airo-spatial-algebra", editable = true }
+airo-camera-toolkit = { path = "airo-mono/airo-camera-toolkit", editable = true }
+airo-robots = { path = "airo-mono/airo-robots", editable = true }
+lerobot = { path = "lerobot", editable = true }
+airo-teleop-devices = { path = "airo-teleop/airo-teleop-devices", editable = true }
+airo-teleop-agents = { path = "airo-teleop/airo-teleop-agents", editable = true }
+
+[dependency-groups]
+dev = ["pytest"]
+
+# moved here from setup.cfg; setup.cfg is kept for flake8, which cannot read pyproject.toml
+[tool.pytest.ini_options]
+python_files = ["test_*.py"]
