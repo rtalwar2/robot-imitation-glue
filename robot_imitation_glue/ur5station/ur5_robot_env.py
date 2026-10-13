@@ -244,6 +244,28 @@ class UR5eStation(BaseEnv):
         # do not wait, handling timings is the responsibility of the caller
         return
 
+    def act_joints(self, robot_joints, gripper_pose, timestamp):
+
+        if isinstance(gripper_pose, np.ndarray):
+            gripper_pose = gripper_pose[0].item()
+
+        duration = timestamp - time.time()
+        if duration < 0:
+            logger.warning("Action duration is negative, setting it to 0")
+            duration = 0
+        logger.debug(f"Moving robot to joint configuration {robot_joints} with duration {duration}")
+
+        self.robot.servo_to_joint_configuration(robot_joints, duration)
+
+        gripper_width = np.clip(
+            gripper_pose, self.gripper.gripper_specs.min_width, self.gripper.gripper_specs.max_width
+        )
+        logger.debug(f"Setting gripper width to {gripper_width}")
+        self.gripper.servo(gripper_width)
+
+        # do not wait, handling timings is the responsibility of the caller
+        return
+
     def close(self):
         self._wrist_camera_publisher.stop()
         self._scene_camera_publisher.stop()
