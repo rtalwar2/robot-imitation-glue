@@ -32,6 +32,11 @@ The code is written modularly so that you can easily:
 ![](docs/action-flow.png)
 
 
+## Documentation
+
+- [Debugging best practices](docs/debugging.md): replaying episodes, running inference offline, hardware-free testing with the mock env, dataset utilities and the common pitfalls.
+
+
 ## Examples
 
 2 examples are available of how to integrate this codebase for your robot.
