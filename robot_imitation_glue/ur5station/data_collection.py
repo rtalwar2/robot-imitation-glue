@@ -9,7 +9,10 @@ from robot_imitation_glue.dataset_recorder import LeRobotDatasetRecorder
 
 # the action encoding is shared with the dataset preparation and the eval scripts,
 # see robot_imitation_glue.preprocessing for the inverse conversion.
-from robot_imitation_glue.preprocessing import abs_se3_to_policy_action_converter
+# both converters used to be defined in this module: keep re-exporting them so that existing
+# `from robot_imitation_glue.ur5station.data_collection import ...` imports keep working.
+from robot_imitation_glue.preprocessing import abs_se3_to_policy_action_converter  # noqa: F401
+from robot_imitation_glue.preprocessing import policy_action_to_abs_se3_converter  # noqa: F401
 from robot_imitation_glue.ur5station.ur5_robot_env import (
     GELLO_AGENT_PORT,
     UR5eStation,

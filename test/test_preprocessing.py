@@ -93,6 +93,19 @@ def test_lerobot_key_mapping_targets_are_unique():
     assert len(set(LEROBOT_KEY_MAPPING.values())) == len(LEROBOT_KEY_MAPPING)
 
 
+def test_lerobot_image_tensor_roundtrip():
+    pytest.importorskip("torch")
+    from robot_imitation_glue.preprocessing import image_to_lerobot_tensor, lerobot_tensor_to_image
+
+    image = np.arange(16 * 16 * 3, dtype=np.int64).reshape(16, 16, 3).astype(np.uint8)
+    tensor = image_to_lerobot_tensor(image, add_batch_dim=False)
+
+    # LeRobotDataset returns images as CHW float in [0,1], which lerobot_tensor_to_image has to scale back by 255
+    assert tuple(tensor.shape) == (3, 16, 16)
+    assert float(tensor.max()) <= 1.0
+    np.testing.assert_array_equal(lerobot_tensor_to_image(tensor), image)
+
+
 def test_tcp_offset_transform():
     transform = tcp_offset_transform()
 
@@ -117,7 +130,23 @@ def test_delta_action_converter_roundtrip():
 
     assert relative_action.shape == (7,)
     assert relative_action.dtype == np.float32
-    # the relative encoding is expressed in the EEF frame, so re-applying it must reproduce the target pose
+
+    # the relative encoding is expressed in the current EEF frame, so re-applying it to the current pose must
+    # reproduce the target pose (the delta action itself is base-aligned, so it is not simply returned).
+    from scipy.spatial.transform import Rotation as R
+
+    relative_se3 = np.eye(4)
+    relative_se3[:3, :3] = R.from_euler("xyz", relative_action[3:6].astype(np.float64)).as_matrix()
+    relative_se3[:3, 3] = relative_action[:3]
+    np.testing.assert_allclose(pose @ relative_se3, target_pose, atol=1e-5)
+
+    # the delta position is applied in the base frame
+    np.testing.assert_allclose(target_pose[:3, 3], pose[:3, 3] + delta_action[:3], atol=1e-9)
+    # and the delta rotation is applied in a base-aligned frame at the EEF
+    np.testing.assert_allclose(
+        target_pose[:3, :3], R.from_euler("xyz", delta_action[3:6]).as_matrix() @ pose[:3, :3], atol=1e-9
+    )
+
     np.testing.assert_allclose(relative_action[6], delta_action[6], atol=1e-6)
     assert target_gripper == pytest.approx(gripper_state + delta_action[6])
 
