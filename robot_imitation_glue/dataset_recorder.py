@@ -124,7 +124,6 @@ class LeRobotDatasetRecorder(BaseDatasetRecorder):
             "next.reward": torch.tensor([0.0]),
             "next.success": torch.tensor([False]),
             "seed": torch.tensor([0]),  # TODO: store the seed
-            "task": "",
         }
         for key in self.image_keys:
             lerobot_key = self.key_mapping_dict.get(key, key)
@@ -132,7 +131,8 @@ class LeRobotDatasetRecorder(BaseDatasetRecorder):
 
         for key in self.state_keys:
             frame[key] = torch.tensor(obs[key])
-        self.lerobot_dataset.add_frame(frame)
+        # the pinned lerobot takes the task as an argument, not as a frame key (add_frame(frame, task, timestamp))
+        self.lerobot_dataset.add_frame(frame, task="")
 
     def save_episode(self):
         self.lerobot_dataset.save_episode()

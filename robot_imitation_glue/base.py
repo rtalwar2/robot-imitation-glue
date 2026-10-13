@@ -1,7 +1,18 @@
 import abc
+import enum
+
+
+class ActionType(enum.Enum):
+    """the space in which actions are expressed."""
+
+    ABS_EEF = "abs_eef"
+    REL_EEF = "rel_eef"
+    ABS_JOINT = "abs_joint"
+    REL_JOINT = "rel_joint"
 
 
 class ActionSpec:
+    action_type = None
     representation = None
     reference_frame = None
 
@@ -21,6 +32,12 @@ class BaseEnv(abc.ABC):
 
     @abc.abstractmethod
     def act(self, robot_pose_se3, gripper_pose, timestamp):
+        raise NotImplementedError
+
+    def act_joints(self, robot_joints, gripper_pose, timestamp):
+        """servo to an absolute target joint configuration (n,) and absolute gripper width, non-blocking.
+
+        Only envs with ACTION_SPEC.action_type in (ABS_JOINT, REL_JOINT) need to implement this."""
         raise NotImplementedError
 
     def reset(self):
@@ -69,10 +86,6 @@ class BaseAgent(abc.ABC):
     def action_spec(self):
         return self.ACTION_SPEC
 
-
-# define different action types
-# ABS_EEF, REL_EEF, ABS_JOINT, REL_JOINT
-# relative to what?
 
 # define different PROPRIO_OBS_TYPES
 # how are orientations represented?
