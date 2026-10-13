@@ -141,6 +141,10 @@ class LeRobotDatasetRecorder(BaseDatasetRecorder):
         self.lerobot_dataset.add_frame(frame, task="")
 
     def set_episode_success(self, success):
+        """Episode-level label: sets next.success of *all* frames in the current episode buffer (see
+        BaseDatasetRecorder.set_episode_success)."""
+        # the pinned lerobot (lerobot.common) keeps the unsaved episode in `episode_buffer`; it is None on a
+        # dataset that was loaded from disk until the first add_frame(), i.e. there is nothing to label.
         episode_buffer = self.lerobot_dataset.episode_buffer
         if episode_buffer is None:
             return
@@ -149,6 +153,7 @@ class LeRobotDatasetRecorder(BaseDatasetRecorder):
         episode_buffer["next.success"] = [np.array([bool(success)])] * episode_buffer["size"]
 
     def delete_episode(self):
+        """Discard the current episode buffer (and its temporary images); saved episodes are untouched."""
         if self.lerobot_dataset.episode_buffer is None:
             return
         # clear_episode_buffer() removes this episode's image dir but, unlike save_episode(), does not

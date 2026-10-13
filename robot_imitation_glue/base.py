@@ -106,15 +106,21 @@ class BaseDatasetRecorder:
         raise NotImplementedError
 
     def set_episode_success(self, success):
-        """Label every frame recorded so far in the current (unsaved) episode with this
-        outcome. Call once the episode's true outcome is known, right before save_episode()
-        -- outcomes are often only knowable in hindsight (e.g. a check-then-recover loop),
-        so passing `success` into record_step() per-step cannot label the frames where the
-        task actually completes."""
+        """Label the current (unsaved) episode with its outcome. This is an *episode-level* label: every
+        frame recorded so far in the episode gets `next.success = success` (overwriting the per-step
+        default of False written by record_step()). Call it once the outcome is known, right before
+        save_episode(); outcomes are often only knowable in hindsight (e.g. a check-then-recover loop),
+        so a per-step flag cannot label the frames where the task actually completes.
+
+        Note that this differs from the usual (gym/lerobot) per-step meaning of `next.success`, where only
+        the terminal frame(s) are True. Consumers should treat the column as constant per episode, e.g.
+        keep episodes whose frames are all True. Frames recorded after this call get the default False
+        again, so call it last."""
         raise NotImplementedError
 
     def delete_episode(self):
-        """discard the current (unsaved) episode."""
+        """Discard the current (unsaved) episode. Already saved episodes are not affected; the next
+        recorded episode reuses the discarded episode's index."""
         raise NotImplementedError
 
     def finish_recording(self):
