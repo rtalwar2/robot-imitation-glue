@@ -8,7 +8,14 @@ import loguru
 import numpy as np
 import rerun as rr
 
-from robot_imitation_glue.action_spaces import is_joint_action_type, resolve_action_type
+from robot_imitation_glue.action_spaces import (
+    DEFAULT_MAX_JOINT_DELTA,
+    approach_teleop_joint_configuration,
+    confirm_joint_approach,
+    is_joint_action_type,
+    joint_target_is_safe,
+    resolve_action_type,
+)
 from robot_imitation_glue.base import BaseAgent, BaseDatasetRecorder, BaseEnv
 from robot_imitation_glue.utils import precise_wait
 
@@ -85,6 +92,8 @@ def collect_data(  # noqa: C901
     abs_pose_to_policy_action: converter_callable = None,
     teleop_to_joints_converter: converter_callable = None,
     abs_joints_to_policy_action: converter_callable = None,
+    max_joint_delta: float = DEFAULT_MAX_JOINT_DELTA,
+    confirm_joint_approach=confirm_joint_approach,
 ):
     """collect teleop demonstrations with the given env/agent pair.
 
@@ -97,6 +106,12 @@ def collect_data(  # noqa: C901
       converters receive the *measured* joint configuration of the robot (no integration, teleop
       devices such as a Gello arm already provide absolute joint targets), actions are sent to
       `env.act_joints`.
+      Before the loop starts, the robot is moved slowly (`env.move_robot_to_joint_configuration`, after
+      `confirm_joint_approach(current, target)`, pass None to skip the confirmation) to the configuration of the
+      teleop device. Joint targets that are more than `max_joint_delta` rad away from the measured configuration
+      are not sent (and not recorded), see `action_spaces.joint_target_is_safe`.
+
+    See `action_spaces.resolve_action_type` for how the ACTION_SPECs of env and agent are checked.
     """
     action_type = resolve_action_type(env, teleop_agent)
     is_joint_action = is_joint_action_type(action_type)
@@ -117,6 +132,11 @@ def collect_data(  # noqa: C901
     listener = init_keyboard_listener(event, state)
 
     control_period = 1 / frequency
+
+    if is_joint_action:
+        # absolute joint teleop devices (gello) are not integrated from the robot state, so the first command
+        # would make the robot jump to the device's configuration: approach it slowly first.
+        approach_teleop_joint_configuration(env, teleop_agent, teleop_to_joints_converter, confirm_joint_approach)
 
     target_pose = env.get_robot_pose_se3()
     target_gripper_state = env.get_gripper_opening()
@@ -209,11 +229,15 @@ def collect_data(  # noqa: C901
                 current_joints, current_gripper_state, new_joint_target, new_gripper_target_width
             )
 
-            env.act_joints(
-                robot_joints=new_joint_target,
-                gripper_pose=new_gripper_target_width,
-                timestamp=time.time() + control_period,
-            )
+            if joint_target_is_safe(current_joints, new_joint_target, max_joint_delta):
+                env.act_joints(
+                    robot_joints=new_joint_target,
+                    gripper_pose=new_gripper_target_width,
+                    timestamp=time.time() + control_period,
+                )
+            else:
+                # not executed, so do not record it as a demonstration step either
+                policy_formatted_action = None
 
         else:
             new_robot_target_se3_pose, new_gripper_target_width = teleop_to_pose_converter(
@@ -234,7 +258,7 @@ def collect_data(  # noqa: C901
                 timestamp=time.time() + control_period,
             )
 
-        if state.is_recording:
+        if state.is_recording and policy_formatted_action is not None:
             dataset_recorder.record_step(observation, policy_formatted_action)
 
         # wait for end of the control period
