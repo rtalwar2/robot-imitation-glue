@@ -122,7 +122,9 @@ class BCPolicy(nn.Module):
         return nn.functional.mse_loss(self.forward(images, proprio), action)
 
 
-def save_checkpoint(path, policy: BCPolicy, proprio_normalizer: Normalizer, action_normalizer: Normalizer, image_size):
+def save_checkpoint(
+    path, policy: nn.Module, proprio_normalizer: Normalizer, action_normalizer: Normalizer, image_size
+):
     """save the weights, the model config and the normalization statistics in a single file."""
     torch.save(
         {
@@ -136,11 +138,14 @@ def save_checkpoint(path, policy: BCPolicy, proprio_normalizer: Normalizer, acti
     )
 
 
-def load_checkpoint(path, device="cpu"):
-    """returns (policy, proprio_normalizer, action_normalizer, image_size), all on the requested device."""
+def load_checkpoint(path, device="cpu", policy_class=BCPolicy):
+    """returns (policy, proprio_normalizer, action_normalizer, image_size), all on the requested device.
+
+    `policy_class` is constructed from the config stored in the checkpoint, so other policies with the same
+    checkpoint format (e.g. `dit_policy.DiTPolicy`) can reuse this loader."""
     checkpoint = torch.load(path, map_location=device, weights_only=False)
     config = checkpoint["config"]
-    policy = BCPolicy(**config)
+    policy = policy_class(**config)
     policy.load_state_dict(checkpoint["model_state_dict"])
     policy.to(device)
     policy.eval()

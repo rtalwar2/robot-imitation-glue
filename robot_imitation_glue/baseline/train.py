@@ -52,12 +52,16 @@ class BCDataset(Dataset):
     def __len__(self) -> int:
         return len(self.dataset)
 
-    def __getitem__(self, idx: int):
-        sample = self.dataset[idx]
-        images = {
+    def preprocess_images(self, sample: dict) -> dict[str, torch.Tensor]:
+        """the camera images of a lerobot sample as (3, image_size, image_size) float tensors in [0,1]."""
+        return {
             key: resize_image(to_chw_float_image(sample[key]).unsqueeze(0), self.image_size).squeeze(0)
             for key in self.image_keys
         }
+
+    def __getitem__(self, idx: int):
+        sample = self.dataset[idx]
+        images = self.preprocess_images(sample)
         proprio = sample[self.state_key].float()
         action = sample[self.action_key].float()
         # lerobot can return an action chunk, this baseline only predicts a single action
