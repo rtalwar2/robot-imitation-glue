@@ -11,3 +11,5 @@ outputs/
 models/
 ast_delta_z/
 lid_touch_point_debug/
+# plug sim: generated GPULab job files (submit_gpulab.sh rewrites them per submit)
+peg_sim_experiment/generated/
