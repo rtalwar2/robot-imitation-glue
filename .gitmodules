@@ -13,3 +13,6 @@
 [submodule "airo-teleop-agents"]
 	path = airo-teleop-agents
 	url = https://github.com/rtalwar2/airo-teleop.git
+[submodule "keypoint-detection"]
+	path = keypoint-detection
+	url = https://github.com/tlpss/keypoint-detection.git

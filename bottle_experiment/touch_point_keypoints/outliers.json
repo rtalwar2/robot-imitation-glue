@@ -1,0 +1,6 @@
+{
+  "exclude": [132],
+  "why": {
+    "132": "random click, confirmed by the operator on 2026-10-09 from the cross-validation review (the 24 largest disagreements; the other 23 clicks were correct)"
+  }
+}
