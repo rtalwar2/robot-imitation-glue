@@ -57,9 +57,12 @@ SENSOR_KEY = "bottle_sensor"
 # with one trained under the new, so re-screen rather than reuse checkpoints.
 #
 # Re-derive together with PER_CHANNEL_THRESHOLDS (hardware/bottle_sensor.py, the single source
-# every runner imports) whenever the cap, sensor mounting or opening motion changes:
-#   python bottle_experiment/derive_thresholds.py run_0013 run_0018 run_0020 run_0021 run_0022 run_0023
-CALIBRATED_RANGE = ((3.026, 3.252), (2.633, 3.29), (2.101, 3.297))
+# every runner imports) whenever the cap, sensor mounting or opening motion changes. Since 2026-10-09
+# the ends are the 1st/99th PERCENTILE per channel rather than the single lowest/highest sample (one
+# outlier no longer sets the scale), over the retuned motion's fully-closed runs run_0024, 0026-0028,
+# 0030, 0032-0038, from the grip point to 1.5 s after lift-off (12199 samples); normalize_sensor clips
+# to [0, 1] accordingly.
+CALIBRATED_RANGE = ((3.045, 3.252), (2.643, 3.277), (2.104, 3.297))
 
 VALIDATION_FRACTION = 0.1
 
@@ -67,7 +70,7 @@ VALIDATION_FRACTION = 0.1
 def normalize_sensor(readings: np.ndarray) -> np.ndarray:
     lo = np.array([low for low, _ in CALIBRATED_RANGE], dtype=np.float32)
     hi = np.array([high for _, high in CALIBRATED_RANGE], dtype=np.float32)
-    return ((np.asarray(readings, dtype=np.float32) - lo) / (hi - lo)).astype(np.float32)
+    return np.clip((np.asarray(readings, dtype=np.float32) - lo) / (hi - lo), 0.0, 1.0).astype(np.float32)
 
 
 def spectrogram_from_frame(frame: dict) -> np.ndarray:

@@ -20,6 +20,7 @@ def transform_dataset(  # noqa: C901
     image_writer_processes: int = 0,
     image_writer_threads: int = 16,
     verbose: bool = True,
+    episode_index_key: Optional[str] = None,
 ) -> LeRobotDataset:
     """Transform a LeRobot dataset using custom mapping functions.
 
@@ -39,6 +40,8 @@ def transform_dataset(  # noqa: C901
         image_writer_processes: Number of processes for image writing.
         image_writer_threads: Number of threads for image writing.
         verbose: Whether to print progress information.
+        episode_index_key: If set, each frame passed to transform_fn carries its source episode index under
+            this key (for per-episode transforms); transform_fn must pop it.
 
     Returns:
         The transformed LeRobot dataset.
@@ -154,6 +157,9 @@ def transform_dataset(  # noqa: C901
                 if hasattr(value, "shape") and len(value.shape) == 3:
                     value = value.permute(1, 2, 0)
                     frame[key] = value
+
+            if episode_index_key is not None:
+                frame[episode_index_key] = ep_idx
 
             # Apply the transformation function
             new_frame = transform_fn(frame)

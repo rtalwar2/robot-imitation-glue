@@ -14,6 +14,7 @@ exactly the commanded delta pose.
 import sys
 import time
 from pathlib import Path
+from queue import Empty
 
 import cv2
 import loguru
@@ -30,7 +31,12 @@ from robot_imitation_glue.collect_data_delta import (
     policy_action_to_tcp_pose,
     step_action_to_policy_action_6d,
 )
-from robot_imitation_glue.hardware.bottle_sensor import PER_CHANNEL_THRESHOLDS, SENSOR_CHECKPOINTS, is_uncovered
+from robot_imitation_glue.hardware.bottle_sensor import (
+    SENSOR_CHECKPOINTS,
+    channels_open,
+    is_cap_open,
+    is_uncovered,
+)
 from robot_imitation_glue.utils import precise_wait
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -43,6 +49,7 @@ from calibrate_and_hover_bottle import (  # noqa: E402
     tcp_left_to_camera,
 )
 from motion_constants import (  # noqa: E402
+    CHECKPOINT_GRACE_S,
     DEPTH_NUDGE_M,
     LEGS,
     MAX_MOTION_RETRIES,
@@ -50,6 +57,7 @@ from motion_constants import (  # noqa: E402
     OPEN_POLL_S,
     RETRACT_LIFT_METERS,
     STOP_LEGS_WHEN_OPEN,
+    TURN_DURING_LEGS,
 )
 from open_bottle_agent import (  # noqa: E402
     LEFT_HOME_JOINTS,
@@ -60,14 +68,20 @@ from open_bottle_agent import (  # noqa: E402
     log_plan_to_rerun,
     plan_opening_motion,
 )
+from opening_motion import in_place_turns, make_pose, retreat_rotations, turn_angle_of  # noqa: E402
 from open_bottle_demo import (  # noqa: E402
     pixel_to_point_on_cap_plane,
+    resolve_touch_point,
     save_touch_point_sample,
-    verify_or_correct_touch_point,
 )
-from touch_point_detector import detect_touch_point  # noqa: E402
 
 logger = loguru.logger
+
+# Right-arm (bottle) gripper widths, metres between fingers -- set at the rig during the 2026-10
+# recollection prep: 0.040 clears the bottle body for release/placement, 0.023 is the taught
+# clamp on the body (never fully closed, so the grasp force limits the squeeze).
+GRIPPER_OPEN_WIDTH_M = 0.028
+GRIPPER_GRASP_WIDTH_M = 0.023
 
 
 def log_observation_to_rerun(obs, recording, n_episodes, label=""):
@@ -180,8 +194,9 @@ def servo_to_waypoint(
 def _check_checkpoint(env, event_name):
     """Evaluate the sensor-verified checkpoint for event_name, if SENSOR_CHECKPOINTS gates it.
 
-    Returns None if event_name isn't gated, True if gated and satisfied, False if gated and
-    not satisfied. Raises if the sensor feed has never delivered a real sample (see
+    Returns None if event_name isn't gated, True if gated and satisfied within CHECKPOINT_GRACE_S
+    (the lid can finish flipping just after the arm stops), False if gated and still not satisfied
+    after it. Raises if the sensor feed has never delivered a real sample (see
     BottleSensorSubscriber.has_received_sample) -- otherwise a dead/disconnected
     bottle_ble_reader.py would silently read as "still covered" forever.
     """
@@ -198,6 +213,10 @@ def _check_checkpoint(env, event_name):
             "keep retrying against a dead sensor feed."
         )
 
+    deadline = time.monotonic() + CHECKPOINT_GRACE_S
+    while not is_uncovered(reading, required_channels) and time.monotonic() < deadline:
+        precise_wait(OPEN_POLL_S)
+        reading = env.get_observations()["bottle_sensor"]
     if is_uncovered(reading, required_channels):
         logger.info(f"[verify] {event_name}: OK (reading={np.round(reading, 2)})")
         return True
@@ -206,7 +225,7 @@ def _check_checkpoint(env, event_name):
 
 
 def _cap_is_open_sustained(env, dwell_s=OPEN_DWELL_S):
-    """True only if every channel holds at/above its own threshold for `dwell_s` straight.
+    """True only if the deciding channels (OPEN_CHANNELS: S1, S2) hold at/above threshold for `dwell_s` straight.
 
     Polled because the DDS subscriber keeps a single sample (History.KeepLast(1)) -- there is no
     history to look back through, so "sustained" has to be measured forward. The poll does not move
@@ -221,7 +240,7 @@ def _cap_is_open_sustained(env, dwell_s=OPEN_DWELL_S):
     deadline = time.monotonic() + dwell_s
     while True:
         reading = env.bottle_sensor.get_bottle_sensor()
-        if not is_uncovered(reading, list(range(len(PER_CHANNEL_THRESHOLDS)))):
+        if not is_cap_open(reading):
             return False
         if time.monotonic() >= deadline:
             return True
@@ -248,11 +267,86 @@ def _lift_off_cap(env, dataset_recorder, cap_normal, control_period, reason):
     )
 
 
+def _unwind_in_place(env, dataset_recorder, plan, cap_normal, to_angle, control_period, reason):
+    """Turn the gripper in place, recorded, to `to_angle` about the cap normal (turn_angle_of's scale: 0 =
+    the push's yaw), in steps that each take the intended way round.
+
+    Needed because servo_to_waypoint follows the SHORTEST rotation: the legs turn the gripper by up to
+    ~240 deg, so servoing straight back to the push's yaw or the hover pose would keep turning instead
+    of unwinding and wind the wrist (and the camera cable) a full turn.
+    """
+    current = env.get_robot_pose_se3()
+    from_angle = turn_angle_of(plan, cap_normal, current)
+    for rotation in in_place_turns(plan, cap_normal, from_angle, to_angle):
+        current = servo_to_waypoint(env, dataset_recorder, make_pose(rotation, current[:3, 3]), control_period,
+                                    label=f"unwinding in place ({reason})")
+    return current
+
+
+def _retreat_to_hover(env, dataset_recorder, plan, cap_normal, hover_pose, control_period):
+    """Rise to the hover pose WHILE unwinding, recorded.
+
+    The rotation back to the hover orientation can exceed 180 deg, and servo_to_waypoint follows the
+    shortest rotation, so one servo to hover_pose would keep turning and wind the wrist. retreat_rotations
+    undoes the wrist's net turn since hover in one direction, in steps of <= 120 deg (undoing the leg turns
+    and then the initial yaw separately reversed direction when those had opposite signs), and the position
+    rises toward the hover position across those steps -- the gripper climbs away from the lid while it turns.
+    """
+    current = env.get_robot_pose_se3()
+    rotations = retreat_rotations(plan, cap_normal, current, hover_pose[:3, :3])
+    start, end = current[:3, 3], hover_pose[:3, 3]
+    for k, rotation in enumerate(rotations, start=1):
+        current = servo_to_waypoint(
+            env, dataset_recorder, make_pose(rotation, start + (end - start) * k / len(rotations)), control_period,
+            max_translation_step=RETREAT_SPEED * control_period,
+            label=f"returning to hover while unwinding ({k}/{len(rotations)})",
+        )
+    return current
+
+
+def _move_gripper_to(env, width, tol_m=0.002, timeout_s=10.0):
+    """Command the bottle gripper to `width` and block until the fingers are done.
+
+    Polls get_current_width(), not move()'s AwaitableAction: that sleeps 0.11 s and then checks
+    velocity, so it can report done while the fingers are still at the old width. Completion is
+    arrival OR stall-after-moving -- a grasp legitimately stalls on the bottle body (the force
+    limit working), so the position need not reach the target there.
+
+    Raises on failure instead of warning-and-continuing: if the fingers are not holding the
+    bottle, the taught grasp transform behind get_bottle_cap_pose() is fiction and every frame
+    recorded afterwards would be a poisoned episode.
+    """
+    try:
+        env.gripper.move(width)
+        deadline = time.monotonic() + timeout_s
+        started = False
+        while time.monotonic() < deadline:
+            if abs(env.gripper.get_current_width() - width) <= tol_m:
+                return
+            if env.gripper.is_moving():
+                started = True
+            elif started:
+                return  # moved, then stalled: contact with the bottle body or a hard stop
+            time.sleep(0.02)
+        stuck_at = env.gripper.get_current_width()
+    except Empty as exc:
+        raise RuntimeError(
+            "[gripper] the gripper child process stopped answering commands (result-queue timeout) "
+            "-- it died after startup or lost the port; restart the collector"
+        ) from exc
+    raise RuntimeError(
+        f"[gripper] could not reach {width:.3f} m (fingers stuck at {stuck_at:.3f} m) -- the bottle "
+        "is not grasped; aborting the episode rather than recording garbage"
+    )
+
+
 def _build_motion_segments(plan):
     """The motion as an ordered list of (label, base_target_pose, checkpoint_event_or_None).
 
     Segment order: approach (yaw+descend, ungated) -> push (gated only if push_end is in
-    SENSOR_CHECKPOINTS) -> leg2 (leg_2_end) -> leg3 (leg_3_end) -> leg4..leg6 (ungated).
+    SENSOR_CHECKPOINTS) -> leg2 (leg_2_end) -> leg3 (leg_3_end) -> leg4..leg6 (ungated). Every leg pose
+    carries its turn (opening_motion: the gripper turns with the path); with TURN_DURING_LEGS off, an
+    ungated in-place turn segment precedes each leg.
     """
     approach_pose, push_pose, *leg_poses = plan["waypoint_poses"]
     # Only name a checkpoint that the map actually gates: a segment labelled with an ungated event
@@ -266,6 +360,8 @@ def _build_motion_segments(plan):
         event_name = f"leg_{leg_index + 2}_end"
         checkpoint = event_name if event_name in SENSOR_CHECKPOINTS else None
         label = f"leg{leg_index + 2} ({angle_deg:.0f} deg from previous direction, {offset * 100:.0f}cm)"
+        if not TURN_DURING_LEGS:
+            segments.append((f"turn before leg{leg_index + 2}", plan["leg_turn_poses"][leg_index], None))
         segments.append((label, leg_pose, checkpoint))
     return segments
 
@@ -280,7 +376,7 @@ def _previous_checkpoint_segment_index(segments, segment_index):
 
 def run_opening_motion_with_retry(env, dataset_recorder, plan, cap_normal, control_period):
     """Execute the descend + push + LEGS motion, gated by sensor-verified checkpoints
-    (leg_2_end, leg_3_end -- see SENSOR_CHECKPOINTS), pressing DEPTH_NUDGE_M
+    (leg_2_end, leg_3_end, leg_5_end -- see SENSOR_CHECKPOINTS), pressing DEPTH_NUDGE_M
     deeper into the cap on every retry (an identical replay would very likely just fail
     identically) -- up to MAX_MOTION_RETRIES times.
 
@@ -298,9 +394,11 @@ def run_opening_motion_with_retry(env, dataset_recorder, plan, cap_normal, contr
 
     Returns (final_pose, success): success is True only once the LAST gated checkpoint of
     SENSOR_CHECKPOINTS -- the stage where the final channel uncovers -- has passed. It is located
-    by position rather than by a hardcoded event name: after the 2026-10-07 remap to
-    {leg_2_end: S0, leg_3_end: S1+S2} a literal "leg_6_end" comparison could never fire, and every
-    episode would have been recorded as a failure.
+    by position rather than by a hardcoded event name: after the first 2026-10-07 remap a literal
+    "leg_6_end" comparison could never fire and every episode would have been recorded as a
+    failure. The map was re-remapped the SAME DAY (S2 leg_3_end -> leg_5_end, after the first
+    collected pose showed a leg-3 rotation shortfall) -- which is precisely why the gate resolves
+    by position and survived both remaps without a code change.
     """
     segments = _build_motion_segments(plan)
     gated_indices = [i for i, (_, _, cp) in enumerate(segments) if cp is not None]
@@ -310,6 +408,9 @@ def run_opening_motion_with_retry(env, dataset_recorder, plan, cap_normal, contr
     resume_index = 0
     reached_pose = segments[0][1]
     episode_success = False
+    # Stop-on-open (and its success label) needs every channel to have read covered before the push; a
+    # channel already open at the grip point makes "all channels open" true as soon as the others open.
+    stop_on_open_armed = True
 
     while True:
         depth_offset = -attempt * DEPTH_NUDGE_M * cap_normal
@@ -332,15 +433,25 @@ def run_opening_motion_with_retry(env, dataset_recorder, plan, cap_normal, contr
                 env, dataset_recorder, target_pose, control_period,
                 label=f"attempt {attempt}: {label}",
             )
+            if segment_index == 0 and attempt == 0:  # at the grip point, before the push
+                reading = env.bottle_sensor.get_bottle_sensor()
+                already_open = channels_open(reading)
+                if already_open:
+                    stop_on_open_armed = False
+                    logger.warning(
+                        "[sensor] " + ", ".join(f"S{c} ({reading[c]:.2f} V)" for c in already_open)
+                        + " already read(s) OPEN at the grip point, before the push -- is the cap fully closed? "
+                        "Stop-on-open is OFF for this episode and its checkpoints on those channels prove nothing."
+                    )
 
             # Checked after every segment, including ungated ones: once the whole cap is open the
             # remaining legs have nothing left to do. Cost is nil before the pop -- the poll returns
             # on its first read as soon as any channel is still covered.
-            if STOP_LEGS_WHEN_OPEN and _cap_is_open_sustained(env):
+            if STOP_LEGS_WHEN_OPEN and stop_on_open_armed and _cap_is_open_sustained(env):
                 episode_success = True
                 stopped_open = True
                 logger.info(
-                    f"[verify] cap fully open (all {len(PER_CHANNEL_THRESHOLDS)} channels >= threshold for "
+                    f"[verify] cap fully open (S1 and S2 >= threshold for "
                     f"{OPEN_DWELL_S}s) after '{label}' -- skipping the remaining "
                     f"{len(segments) - segment_index - 1} segment(s) and lifting off"
                 )
@@ -390,6 +501,10 @@ def run_opening_motion_with_retry(env, dataset_recorder, plan, cap_normal, contr
                 resume_index = 0
                 logger.info(f"[verify] '{previous_checkpoint_name}' has also failed -- restarting from the grip point")
 
+        # turn back (in place, at the lifted pose) to the orientation the resumed segment starts from
+        reached_pose = _unwind_in_place(env, dataset_recorder, plan, cap_normal,
+                                        turn_angle_of(plan, cap_normal, segments[resume_index][1]),
+                                        control_period, reason="before the retry")
         attempt += 1
 
     return reached_pose, False
@@ -450,6 +565,11 @@ def collect_data_bottle_opening(env, dataset_recorder, frequency=10, bottle_pose
             # episode-to-episode change in the reading is drift. Must happen before the right arm
             # moves the bottle, so nothing is in contact. The raw reading is still what gets
             # recorded; this only publishes the offset alongside it.
+            # Re-zero the UR's FT sensor first, as eval_bottle and collect_recovery_bottle do: its offset is
+            # fixed in the SENSOR frame, so a home-pose bias alone leaves (R_t - R_home) * offset at every
+            # other orientation. The 90 expert demos of 2026-10-09/10 were collected without this and read
+            # 6.7 N median (up to 17 N) in free air, pose-dependent, vs ~2 N in the eval rollouts.
+            env.robot.rtde_control.zeroFtSensor()
             env.capture_ft_bias()
             log_idle_to_rerun(env, dataset_recorder, "at home -- FT bias captured")
 
@@ -467,9 +587,16 @@ def collect_data_bottle_opening(env, dataset_recorder, frequency=10, bottle_pose
             # a direct pose-to-pose move can sweep through the other arm or the table even though both
             # endpoints are individually fine.
             print("[move] ur_right to the neutral pose")
+            # Fingers open BEFORE travelling: this is also the release point for the bottle held
+            # from the previous episode -- the operator re-stands it at the new pose while the
+            # arm transits, and the close below re-establishes the taught grasp transform
+            # (DEFAULT_TCP_RIGHT_TO_BOTTLE) that get_bottle_cap_pose() infers the cap pose from.
+            print(f"[gripper] ur_right opening to {GRIPPER_OPEN_WIDTH_M:.3f} m")
+            _move_gripper_to(env, GRIPPER_OPEN_WIDTH_M)
             env.move_right_to_joint_configuration(RIGHT_NEUTRAL_JOINTS, joint_speed=RIGHT_JOINT_SPEED)
             env.move_right_to_tcp_pose(tcp_right_pose, joint_speed=RIGHT_JOINT_SPEED)
-
+            print(f"[gripper] ur_right closing on the bottle at {GRIPPER_GRASP_WIDTH_M:.3f} m")
+            _move_gripper_to(env, GRIPPER_GRASP_WIDTH_M)
             cap_pose = env.get_bottle_cap_pose()
             cap_center = cap_pose[:3, 3]
             cap_normal = cap_pose[:3, 2]
@@ -483,41 +610,45 @@ def collect_data_bottle_opening(env, dataset_recorder, frequency=10, bottle_pose
             hover_height = float(cap_normal.dot(current_pose[:3, 3] - cap_center))
             log_idle_to_rerun(env, dataset_recorder, "at hover -- verify the touch point")
 
-            def grab_and_detect():
-                """A fresh wrist frame with the touch-point detector run on it.
-
-                The arm is stationary at the hover pose throughout verification, so re-grabbing
-                does not invalidate hover_height, camera_pose_in_base or cap_pose.
-                """
+            def grab_frame():
+                """A fresh wrist frame. The arm is stationary at the hover pose throughout
+                verification, so re-grabbing does not invalidate hover_height, camera_pose_in_base
+                or cap_pose."""
                 image_bgr = ImageConverter.from_numpy_int_format(
                     env.get_observations()["wrist_image_original"]
                 ).image_in_opencv_format
                 if image_bgr.shape[:2] != (720, 1280):
                     logger.warning(
-                        f"wrist camera resolution is {image_bgr.shape[:2]}, but touch_point_detector's radii "
-                        "were calibrated on 720p (1280x720) frames -- detection may be inaccurate. "
+                        f"wrist camera resolution is {image_bgr.shape[:2]}, but the touch-point detector was "
+                        "trained on 720p (1280x720) frames -- detection may be inaccurate. "
                         "(CameraFactory.create_wrist_camera requests 720p and no longer falls back, so this "
                         "means the frame is being resized somewhere downstream.)"
                     )
-                return image_bgr, detect_touch_point(image_bgr, hover_height)
+                return image_bgr
 
-            image_bgr, detected_pixel = grab_and_detect()
-            # regrab lets 't' replace a blurred/occluded frame instead of forcing a choice
-            # between accepting a bad grab and aborting the episode.
-            touch_pixel, corrected_pixel, verify_overlay, image_bgr, detected_pixel = verify_or_correct_touch_point(
-                image_bgr, detected_pixel, regrab=grab_and_detect
-            )
-            image_rgb = ImageConverter.from_opencv_format(image_bgr).image_in_numpy_int_format
-            save_touch_point_sample(image_bgr, verify_overlay, hover_height, touch_pixel, detected_pixel)
-            if corrected_pixel is not None:
-                print(f"[verify] using corrected touch point {touch_pixel} (detection was {detected_pixel})")
+            # The learned detector's point, with the verify/click window only when it is unsure; grab_frame
+            # lets 't' in that window replace a blurred/occluded frame. The plan prompt can start over from a
+            # fresh frame too: 't' there re-grabs, re-detects and re-plans.
+            while True:
+                touch_pixel, verify_overlay, image_bgr, detected_pixel, human_checked = resolve_touch_point(
+                    grab_frame(), grab_frame
+                )
+                image_rgb = ImageConverter.from_opencv_format(image_bgr).image_in_numpy_int_format
+                if human_checked:  # only frames a person looked at become training labels
+                    save_touch_point_sample(image_bgr, verify_overlay, hover_height, touch_pixel, detected_pixel)
+                if tuple(touch_pixel) != tuple(detected_pixel):
+                    print(f"[verify] using corrected touch point {touch_pixel} (detection was {detected_pixel})")
 
-            touch_point = pixel_to_point_on_cap_plane(touch_pixel, intrinsics, camera_pose_in_base, cap_pose)
-            plan = plan_opening_motion(cap_pose, touch_point)
-            log_plan_to_rerun(image_rgb, intrinsics, camera_pose_in_base, cap_pose, touch_point, touch_pixel, plan)
+                touch_point = pixel_to_point_on_cap_plane(touch_pixel, intrinsics, camera_pose_in_base, cap_pose)
+                plan = plan_opening_motion(cap_pose, touch_point)
+                log_plan_to_rerun(image_rgb, intrinsics, camera_pose_in_base, cap_pose, touch_point, touch_pixel, plan)
 
-            print(f"[plan] touch point={np.round(touch_point, 4)}  grip point={np.round(plan['grip_point'], 4)}")
-            input("Check the plan in rerun. Press Enter to run the opening motion (Ctrl+C to abort)...")
+                print(f"[plan] touch point={np.round(touch_point, 4)}  grip point={np.round(plan['grip_point'], 4)}")
+                answer = input("Check the plan in rerun. Enter = run the opening motion, t = retake the image and "
+                               "re-plan (Ctrl+C to abort): ").strip().lower()
+                if answer != "t":
+                    break
+                print("[detect] retaking the image")
 
             dataset_recorder.start_episode()
 
@@ -530,15 +661,22 @@ def collect_data_bottle_opening(env, dataset_recorder, frequency=10, bottle_pose
             # rather than rising straight up from wherever leg 6 finished gives every demonstration
             # the same terminal state relative to the bottle, instead of one that varies with which
             # leg the motion ended on and how far the retries pushed it.
-            print("[move] returning to the hover pose above the cap")
-            servo_to_waypoint(
-                env, dataset_recorder, hover_pose.copy(), control_period,
-                max_translation_step=RETREAT_SPEED * control_period,
-                label="returning to hover above the cap",
-            )
+            # A motion that ran to its end is still pressed below the cap plane, so it comes off the cap
+            # first (straight up, no rotation); then it rises to hover while unwinding (_retreat_to_hover).
+            if cap_normal @ (env.get_robot_pose_se3()[:3, 3] - cap_center) < 0.0:
+                _lift_off_cap(env, dataset_recorder, cap_normal, control_period, reason="end of the motion")
+            print("[move] returning to the hover pose above the cap, unwinding the leg turns on the way")
+            _retreat_to_hover(env, dataset_recorder, plan, cap_normal, hover_pose, control_period)
 
-            print("[move] retreating ur_left home")
-            env.robot.move_to_joint_configuration(LEFT_HOME_JOINTS, joint_speed=LEFT_TRANSIT_JOINT_SPEED).wait()
+            # ur_left goes home while ur_right takes the bottle back to its neutral pose, at the same time to
+            # save the transit. Both move away from the hover/bottle region; their paths are not checked
+            # against each other, so keep a hand near the e-stop. The next episode's neutral move is then a
+            # no-op, and the fingers still open there first, as before.
+            print("[move] ur_left home and ur_right (with the bottle) to its neutral pose, together")
+            left_home = env.robot.move_to_joint_configuration(LEFT_HOME_JOINTS, joint_speed=LEFT_TRANSIT_JOINT_SPEED)
+            right_neutral = env.robot_right.move_to_joint_configuration(RIGHT_NEUTRAL_JOINTS, joint_speed=RIGHT_JOINT_SPEED)
+            left_home.wait()
+            right_neutral.wait()
 
             # every frame so far was recorded with the dataset default next.success=False --
             # the true outcome is only known now, so label the whole episode retroactively.

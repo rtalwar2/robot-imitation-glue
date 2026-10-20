@@ -57,12 +57,13 @@ import numpy as np
 DEFAULT_LOG_DIR = Path("/home/rtalwar/robot-imitation-glue/bottle_experiment/sensor_logs")
 BOTTLE_SENSOR_PY = Path("/home/rtalwar/robot-imitation-glue/robot_imitation_glue/hardware/bottle_sensor.py")
 
-# Channel -> the checkpoint event that gates it, ONE PER CHANNEL (repeat an event when a
-# checkpoint gates several channels, as the 2026-10-07 remap does for S1+S2 at leg_3_end).
+# Channel -> the checkpoint event that gates it, ONE PER CHANNEL (repeat an event if a checkpoint
+# ever gates several channels; none does since 2026-10-07's second re-map, which moved S2 from
+# leg_3_end to leg_5_end -- see the comment in hardware/bottle_sensor.py).
 # Mirrors SENSOR_CHECKPOINTS in hardware/bottle_sensor.py; overridable with --events. Used for
 # the mapping check and printed against the detected crossings, NOT for cutting the analysis
 # windows (see module docstring).
-DEFAULT_TRANSITION_EVENTS = ["leg_2_end", "leg_3_end", "leg_3_end"]
+DEFAULT_TRANSITION_EVENTS = ["leg_2_end", "leg_3_end", "leg_7_end"]  # per channel; S0 is no longer gated
 
 
 def load_run(path: Path) -> tuple[list[list[float]], dict[str, float]]:
@@ -204,9 +205,14 @@ def report_mapping(windows, transitions, proposed) -> None:
     print("\n=== checkpoint mapping (debounced reading, the signal the checkpoint sees, at each event) ===")
     for stem, samples, events, _ in windows:
         notes = []
+        stopped_early = "stop_on_open" in events  # this run ended its leg chain early; later gates were never reached
         for ch, event in enumerate(transitions):
-            if event not in events or ch not in proposed:
-                notes.append(f"{event}: skipped (no event or no threshold)")
+            if event not in events:
+                if not stopped_early:
+                    notes.append(f"{event} missing")
+                continue
+            if ch not in proposed:
+                notes.append(f"{event}: skipped (no threshold)")
                 continue
             reading = debounced(samples, events[event])
             if reading is None:
@@ -214,13 +220,13 @@ def report_mapping(windows, transitions, proposed) -> None:
                 continue
             if reading[ch] < proposed[ch]:
                 notes.append(f"S{ch} NOT open at {event} ({reading[ch]:.3f} < {proposed[ch]:.2f})")
-            for later in range(ch + 1, 3):
-                # "already open" is only an anomaly if the later channel's OWN gate is a
-                # different event; channels sharing a checkpoint (S1+S2 @ leg_3_end) are
-                # expected to be open at it.
-                if later in proposed and transitions[later] != event and reading[later] >= proposed[later]:
-                    notes.append(f"S{later} already open at {event}")
-        print(f"  {stem}: {'OK' if not notes else '; '.join(notes)}")
+            # No "already open at an earlier event" flag: gates sit downstream of the crossing by
+            # design (that is what makes them pass), and "how early" is already printed as the
+            # crossing-vs-event drift. The first pass over the batch flagged every good run.
+        status = "OK" if not notes else "; ".join(notes)
+        if stopped_early and not notes:
+            status += "  (stopped early on open -- later gates not exercised)"
+        print(f"  {stem}: {status}")
 
 
 def make_plots(windows, transitions, proposed, out_dir: Path) -> None:

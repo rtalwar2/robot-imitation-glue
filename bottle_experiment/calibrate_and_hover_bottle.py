@@ -38,15 +38,23 @@ from camera_utils import freeze_auto_exposure
 LEFT_ROBOT_IP = "10.42.0.163"  # arm with gripper, wrist camera mounted on it
 RIGHT_ROBOT_IP = "10.42.0.162"  # arm holding the bottle
 
-camera_pose_path = "/home/rtalwar/robot-imitation-glue/calibration_2026-07-15_13:20:38/results_n=7/camera_pose_Andreff.json"
+# 2026-10-09 recalibration after the camera MOUNT was changed (16 samples): the five methods agree to 0.14 deg;
+# Haraud/Park/Tsai agree to ~0.5 mm, Daniilidis ~2.5 mm, Andreff sits ~11 mm off along the tool axis (the poses
+# spanned less rotation than on 10-08, max 135 deg, which leaves that depth least constrained). Park = the middle
+# of the agreeing cluster. vs the 10-08 calibration: 7 mm / 1.5 deg -- the mount change, so that file is invalid.
+camera_pose_path = "/home/rtalwar/robot-imitation-glue/bottle_experiment/calibration_2026-10-09_14:45:22/results_n=16/camera_pose_Park.json"
 with open(camera_pose_path, "r") as f:
     # eye-in-hand: transform from ur_left's TCP frame to the wrist camera frame.
     tcp_left_to_camera = Pose.model_validate_json(f.read()).as_homogeneous_matrix()
 
-# Static offset between the two robot bases: ur_right's base sits 91cm along +x from
-# ur_left's base (same orientation), expressed in ur_left's base frame.
+# Static offset between the two robot bases, expressed in ur_left's base frame (same orientation).
+# Was a hand-measured (0.91, 0, 0) m; fitted 2026-10-08 together with DEFAULT_TCP_RIGHT_TO_BOTTLE from
+# 8 poses of calibrate_cap_transform (outputs/cap_transform/cap_transform_20261008_193808.json): the
+# correction halved the per-pose cap-centre residual (1.9 -> 0.96 mm rms) and tightened the independent
+# F/T touch heights from +-1.8 to +-0.8 mm. A yaw term was tried and bought nothing.
 BASE_LEFT_TO_BASE_RIGHT = np.eye(4)
-BASE_LEFT_TO_BASE_RIGHT[0, 3] = 0.91
+BASE_LEFT_TO_BASE_RIGHT[0, 3] = 0.9048
+BASE_LEFT_TO_BASE_RIGHT[1, 3] = 0.0012
 
 MARKER_SIZE = 0.031  # metres, side length of the printed marker on the bottle cap
 HOVER_HEIGHT_METERS = 0.1  # how far above the bottle cap to hover before descending
@@ -54,13 +62,28 @@ HOVER_HEIGHT_METERS = 0.1  # how far above the bottle cap to hover before descen
 # 10x slower than URrtde's default (0.1 m/s)
 HOVER_LINEAR_SPEED = 0.01  # m/s
 
-# ur_right's TCP -> bottle cap transform, calibrated via the 'c' key in the live view.
-# Reused so the marker-based calibration isn't needed on every run -- only recalibrate if
-# the bottle is re-grasped differently.
-DEFAULT_TCP_RIGHT_TO_BOTTLE = np.array([[-0.99864415,  0.03057314,  0.04213239, -0.00804794],
-       [ 0.04195899, -0.00629157,  0.99909952,  0.07657722],
-       [ 0.03081069,  0.99951273,  0.00500022, -0.05562694],
-       [ 0.        ,  0.        ,  0.        ,  1.        ]]
+# ur_right's TCP -> bottle cap transform. ur_right's TCP is the bare FLANGE (pendant TCP offset 0 0 0
+# since 2026-10-08; it was (9.55, 0, 219.5) mm before, so older values are not comparable).
+#
+# Measured 2026-10-08 by robot_imitation_glue/ur5station/bottle/calibrate_cap_transform.py over 8 poses
+# with one grasp: cap centre in x/z triangulated from the sticker over three wrist rolls, cap-top height
+# (y) from an F/T touch with ur_left's fingertips (which sit 21.1 mm short of ur_left's TCP). The cap
+# normal is set exactly along the flange's +y -- the 2.4 deg tilt the ArUco teach gave was marker-pose
+# noise -- and the cap's in-plane x axis along the flange's -x (the fit's 1.8 deg in-plane angle only
+# yawed the hover pose, it never moved the cap centre). Supersedes both the ArUco teach and the
+# single-pose "8.5 mm" correction, which was fitted at one pose and absorbed the stale July camera
+# calibration and the base-to-base error into this matrix.
+# In-plane x/z from the spin measurement of 2026-10-09 (record_cap_spin.py + click_cap_spin.py,
+# outputs/cap_spin/20261009_111331, test pose 0): the bottle turned by hand in the fingers, filmed head-on,
+# a rim feature clicked over 302 deg of the turn -> circle residual 1.2 px, and the sticker (independent
+# of the clicks) sat 2.2 px (~0.6 mm) from the fitted axis. That axis is the cap centre: x 2.59, z 159.63 mm.
+# It replaces the 8-pose triangulation's (6.4, 164.2) and the x = 0 tried by eye. One pose only so far.
+# Re-grasp repeatability is NOT in these numbers.
+DEFAULT_TCP_RIGHT_TO_BOTTLE = np.array(
+    [[-1.0, 0.0, 0.0, 0.00259   ],
+     [ 0.0, 0.0, 1.0, 0.07791464],
+     [ 0.0, 1.0, 0.0, 0.15963   ],
+     [ 0.0, 0.0, 0.0, 1.0       ]]
 )
 
 def detect_marker_in_image(image_bgr, intrinsics):

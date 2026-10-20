@@ -11,41 +11,54 @@ from cyclonedds.sub import DataReader
 from cyclonedds.topic import Topic
 from sensor_comm_dds.communication.data_classes.sequence import Sequence
 
-# Each channel's covered/uncovered separation, derived by bottle_experiment/derive_thresholds.py
-# from the calibration runs recorded under the CURRENT motion: run_0013, run_0018, run_0020-0023
-# (the "test" split poses). run_0017/run_0019 are pose 1, which never opened, and the tool
-# excludes them by itself. Worst-case bands over those runs: S0 covered p99 3.103 / open p1 3.213,
-# S1 2.975 / 3.204, S2 2.932 / 3.223 V.
-#   S0 3.16 -- midpoint of a deliberately thin band: S0's whole excursion is only ~0.11-0.16 V, so
-#              any threshold leaves ~0.05 V of cushion either side. Re-check this channel whenever
-#              the mounting is touched.
-#   S1 3.12 -- biased high on purpose. The old 3.18 sat only 0.024 V below the observed open floor,
-#              so a genuine open could read covered; 3.12 keeps 0.145 V above the covered ceiling
-#              and 0.084 V below the open floor. (The tool's symmetric midpoint is 3.09.)
-#   S2 3.08 -- midpoint. The old 3.00 sat only 0.068 V above the covered ceiling, which is the
-#              dangerous direction: a still-covered cap could be declared open.
+# Each channel's covered/uncovered threshold, re-derived 2026-10-09 for the retuned motion (6 legs,
+# gripper turning with the path) from the "test" split runs whose cap was fully closed at the grip point:
+# run_0024, 0026-0028, 0030, 0032-0038 (runs 0025/0029/0031 started with S2 already reading open -- its
+# lid section had not latched -- and are excluded). Measured per channel as the level held MORE THAN 1 s
+# before its final jump vs the level after it, because that is what separates closed from open; the
+# tool's raw covered/open bands count the partly-lifted stretch before the jump as "covered":
+#   S0 3.20 -- 3.17-3.22 V before vs 3.23-3.24 V after: no usable gap, and it crosses back and forth
+#              1-6 times per run. It always opens FIRST (push / leg 1), so it is kept for logging and
+#              for CALIBRATED_RANGE but decides nothing (see OPEN_CHANNELS, SENSOR_CHECKPOINTS).
+#   S1 3.12 -- 2.98-3.02 V before vs 3.23-3.26 V after (~0.2 V gap), one clean jump during leg 2.
+#   S2 3.10 -- 2.94-2.95 V before vs 3.26 V after (~0.3 V gap). It sits partly lifted (2.7-2.95 V)
+#              through the legs and jumps during the last ones; it is the LAST channel to open, so
+#              "S2 open" is "the cap is fully open".
 # This file is the single source: the analyze fork, the collector and eval all import these, so
 # the only value that must be re-derived alongside them is CALIBRATED_RANGE in train_ast_bottle.py.
-# Run derive_thresholds.py on the calibration batch to move the two together.
-PER_CHANNEL_THRESHOLDS = [3.16, 3.12, 3.08]  # S0, S1, S2, in volts
+PER_CHANNEL_THRESHOLDS = [3.20, 3.12, 3.10]  # S0, S1, S2, in volts
 
-# Which sensor channel (index into PER_CHANNEL_THRESHOLDS) must be uncovered by each named
-# checkpoint, measured on the same runs. S0 crosses right at the end of the push (-0.26 s to
-# +0.12 s around push_end) and was at 100% within the first 16% of leg 2 in every run, so gating it
-# AT push_end failed 2 of 4 runs that opened perfectly -- and with the retry mechanism that means a
-# needless retract + DEPTH_NUDGE_M deeper. It now gates at leg_2_end. S1 and S2 both cross during
-# leg 3 (S1 ~36-49% and S2 ~66-83% into the segment), so leg_3_end gates both. leg_6_end is gone:
-# S2 had already been open for ~2.4 s by then, so that checkpoint passed trivially and proved
-# nothing.
+# The channels that decide "the cap is open" (stop-on-open, episode success): S1 and S2. S0 is left
+# out because it cannot separate the two states (above) and always opens before the others anyway.
+OPEN_CHANNELS = [1, 2]
+
+# Which sensor channel must be uncovered by each named checkpoint (event = end of that stage; the legs
+# are numbered leg_2 .. leg_7 for the six LEGS entries). From the 2026-10-09 runs: S1 jumps 2-3 s before
+# leg_3_end in every run; S2 jumps 1-4 s AFTER leg_5_end -- end of leg 5 / during leg 6 -- so it is
+# judged at the end of the last leg, leg_7_end (gating it at leg_5_end, as before the retune, would fail
+# every run). S0 is not gated. Re-check this map whenever LEGS changes length.
 SENSOR_CHECKPOINTS = {
-    "leg_2_end": [0],
-    "leg_3_end": [1, 2],
+    "leg_3_end": [1],
+    "leg_7_end": [2],
 }
 
 
 def is_uncovered(reading: np.ndarray, channels: list[int]) -> bool:
     """Whether every channel in `channels` reads above its own covered/uncovered threshold."""
     return all(reading[ch] >= PER_CHANNEL_THRESHOLDS[ch] for ch in channels)
+
+
+def is_cap_open(reading: np.ndarray) -> bool:
+    """Whether the deciding channels (OPEN_CHANNELS) all read open."""
+    return is_uncovered(reading, OPEN_CHANNELS)
+
+
+def channels_open(reading: np.ndarray) -> list[int]:
+    """The deciding channels (OPEN_CHANNELS) that already read open -- at the grip point, before the push,
+    these cannot report an opening: test pose 2 of 2026-10-09 (run_0025) had S2 at 3.27 V from the start
+    (its lid section had not latched), so stop-on-open fired as soon as S0 and S1 really opened and the cap
+    was left half closed."""
+    return [ch for ch in OPEN_CHANNELS if reading[ch] >= PER_CHANNEL_THRESHOLDS[ch]]
 
 
 class BottleSensorSubscriber:

@@ -1,10 +1,11 @@
 """One source of truth for the scripted bottle-opening motion.
 
-Four modules run or plan this motion and must never disagree about its shape:
+The waypoints are computed from these constants in ONE function, opening_motion.plan_opening_motion,
+which every module that runs this motion calls (since 2026-10-09; it used to be copied into three):
 
-    open_bottle_demo.py                       -- tunes it interactively (the bench knob panel)
-    open_bottle_demo_analyze_sensors.py       -- records sensor traces of it (threshold derivation)
-    open_bottle_agent.py                      -- plans it (waypoints for the collector)
+    open_bottle_demo.py                       -- runs it once on a hand-placed bottle
+    open_bottle_demo_analyze_sensors.py       -- records sensor traces of it; --pose-index to tune on one pose
+    open_bottle_agent.py                      -- checks its reachability when sampling bottle poses
     robot_imitation_glue/collect_data_bottle.py -- collects the demonstrations with it
 
 The numbers lived in two files once and it cost the calibration campaign: runs 0000-0011 were
@@ -20,23 +21,22 @@ open_bottle_agent.py). This module stays import-free so every consumer can affor
 """
 
 # --- waypoints in the cap's frame ----------------------------------------------------------
-APPROACH_OFFSET = -0.022  # metres above the grip point where the gripper stops (negative = press below the cap plane)
-RADIAL_OUTWARD_OFFSET = 0.01  # metres from the touch point radially outward (away from the cap center)
+APPROACH_OFFSET = -0.026#-0.022  # metres above the grip point where the gripper stops (negative = press below the cap plane)
+RADIAL_OUTWARD_OFFSET = 0.005#0.01  # metres from the touch point radially outward (away from the cap center)
 # metres to the "left" of the touch point: along the cap-plane tangent at the touch point, in the
 # counter-clockwise direction about the cap's outward normal (the direction the old circular
 # motion went). Negate if "left" turns out to be the other way on the real bottle.
-TANGENTIAL_OFFSET = -0.04
-# metres to the "left" of the cap center (same tangential axis as TANGENTIAL_OFFSET):
-# the push line ends here instead of at the center itself. Together with PUSH_OVERSHOOT the two
-# 30cm-scale constants only DEFINE A DIRECTION -- the line actually walked is short.
-PUSH_TARGET_TANGENTIAL_OFFSET = 0.30
-# metres to keep pushing past the push end point along the same line (0.0 = stop exactly there;
-# negative = stop short of it). Length matters more than it looks: at -0.27 the push was a 7.2cm
-# line, a ~102 deg sweep about the cap centre -- over a quarter turn of the unscrewing before leg
-# 1 even ran (run_0011: S0 at 100% of its excursion 0.7s before push_end). -0.29 slides the push
-# back along its OWN line, so the push direction -- and therefore every leg angle -- keeps its
-# meaning.
-PUSH_OVERSHOOT = -0.29
+TANGENTIAL_OFFSET = -0.04#-0.04
+# The push: a straight line from the grip point, PUSH_LENGTH_M long, in the tangent ("left")
+# direction turned PUSH_ANGLE_DEG counter-clockwise about the cap's outward normal -- positive
+# angles tilt it toward the cap centre. Replaces (2026-10-09) the old pair PUSH_TARGET_TANGENTIAL_OFFSET
+# = 0.30 / PUSH_OVERSHOOT = -0.29, two 30 cm constants that nearly cancelled and only encoded this
+# direction and length; at the nominal 40 mm touch radius they gave exactly 8.37 deg / 53.7 mm, so the
+# values below are the retuned motion of 2026-10-07 unchanged. Length matters more than it looks: at
+# 72 mm the push alone swept ~102 deg about the cap centre, over a quarter turn of the unscrewing
+# before leg 2 even ran (run_0011).
+PUSH_ANGLE_DEG = 8#8.37
+PUSH_LENGTH_M = 0.05#0.0537
 # legs of the opening motion, executed in order after the push, each as (angle_deg, offset_m).
 # The angle is measured counter-clockwise about the cap's outward normal RELATIVE TO THE PREVIOUS
 # leg's direction (the first entry is relative to the push direction; 90 = exactly
@@ -45,11 +45,12 @@ PUSH_OVERSHOOT = -0.29
 # helix rather than a flat polyline. Add/remove/tune entries freely -- entry i is the leg gated as
 # leg_{i + 2}_end; the planned path preview, prints, and execution all follow this list.
 LEGS = [
-    (45.0, 0.03),  # leg 2
-    (20.0, 0.06),  # leg 3
-    (30.0, 0.04),  # leg 4
-    (30.0, 0.03),  # leg 5
-    (30.0, 0.01),  # leg 6
+    (20.0, 0.025),  # leg 2
+    (10.0, 0.04),  # leg 3
+    (30.0, 0.035),  # leg 4
+    (20.0, 0.03),  # leg 5
+    (30.0, 0.04),  # leg 6
+    (30.0, 0.02),  # leg 7
 ]
 # metres to press deeper along -cap_normal with each successive leg (cumulative over LEGS), so
 # the fingers keep biting into the rim as the cap turns instead of riding up out of the
@@ -64,7 +65,17 @@ LEG_DEPTH_STEP_M = 0.003
 # counter-clockwise about the cap's outward normal. 90 puts the finger-pair line tangential, so
 # the leading finger tip rakes the serrated rim and levers it (yaw 0 would pinch the rim and drag
 # by friction).
-GRIPPER_YAW_DEG = 90
+GRIPPER_YAW_DEG = 100
+# How the gripper turns during the legs (it always turns IN PLACE before each leg, at YAW_SPEED):
+#   "direction" (B): by each leg's own angle, so its yaw to the direction of travel stays as in the push;
+#   "radius"    (A): by how far the path has gone around the cap centre since the push end, so its yaw to
+#                    the LOCAL radius stays as at the end of the push (only meaningful while on the rim).
+LEG_YAW_MODE = "radius"
+# True: each leg's turn happens DURING the leg, in one moveL at MOVE_SPEED; False: in place before the leg,
+# at YAW_SPEED. (A first version raised the turning legs' speed setting, on the assumption that a moveL
+# would then stretch the translation to keep pace with the rotation; on the rig it did not -- the legs
+# simply ran at up to 0.5 m/s -- so every leg now runs at MOVE_SPEED.)
+TURN_DURING_LEGS = True
 
 # --- speeds --------------------------------------------------------------------------------
 MOVE_SPEED = 0.05  # m/s for the straight moves (approach, push, legs)
@@ -93,3 +104,7 @@ RETRACT_LIFT_METERS = 0.05  # metres to lift off the cap along its normal before
 STOP_LEGS_WHEN_OPEN = True
 OPEN_DWELL_S = 0.5
 OPEN_POLL_S = 0.05
+# How long a checkpoint keeps reading before it calls its channel still covered. The lid finishes flipping
+# just AFTER the arm stops: in run_0024 and run_0033 (2026-10-09) S2 jumped 0.8 s and 1.5 s after the last
+# leg ended, so a single reading at leg_7_end would have retried, deeper, on a cap that was opening.
+CHECKPOINT_GRACE_S = 2.0

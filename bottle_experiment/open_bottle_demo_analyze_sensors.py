@@ -17,32 +17,34 @@ One calibration run per pose: the sensor stream is cut at episode boundaries, so
 saved as its own sensor_logs/run_NNNN.json, tagged with its split and pose slot. Between poses
 you close the cap by hand again, exactly as in the collection loop.
 
+Usage:
+    python open_bottle_demo_analyze_sensors.py                          # one run per test-split pose
+    python open_bottle_demo_analyze_sensors.py --pose-index 0 --runs 5  # tune on ONE pose, 5 runs
+
 Flow:
-  1. grab a frame and run the touch-point detection;
-  2. show the detection in an OpenCV window for verification -- click to correct it if
-     it's wrong (Enter/y/space accepts, r undoes the correction, q/Esc aborts). The frame
-     + verified point are saved to the lid_touch_point_debug dataset either way, growing
-     the labeled set (a failed detection can be labeled by clicking manually);
+  1. grab a frame and run the learned touch-point detector (touch_point_keypoints/);
+  2. if it is confident its point is used as is; otherwise the frame opens in an OpenCV window
+     to verify or correct it (Enter/y/space accepts, r undoes the correction, q/Esc aborts), and
+     that human-checked frame + point is saved to the lid_touch_point_debug dataset;
   3. back-project the verified pixel onto the cap plane (whose pose we know through
      DEFAULT_TCP_RIGHT_TO_BOTTLE) to get the 3D touch point;
-  4. compute the grip point: the touch point shifted RADIAL_OUTWARD_OFFSET radially
-     outward (away from the center, past the cap edge) AND TANGENTIAL_OFFSET to the
-     "left" -- along the cap-plane tangent, in the direction the old circular motion went
-     (counter-clockwise about the cap's outward normal);
+  4. plan the motion (opening_motion.plan_opening_motion): the grip point is the touch point
+     shifted RADIAL_OUTWARD_OFFSET radially outward AND TANGENTIAL_OFFSET to the "left" -- along
+     the cap-plane tangent, counter-clockwise about the cap's outward normal;
   5. show the image with all points + the planned push line in rerun, and wait for Enter;
   6. yaw the gripper in place about its own TCP z-axis to GRIPPER_YAW_DEG relative to the
      touch-point -> bottle-center axis (tune the constant), then move ur_left so the
      gripper is at the grip point, APPROACH_OFFSET along the cap normal;
-  7. wait for Enter again, then push the gripper in a straight line from the grip point
-     to the push end point -- the cap center shifted PUSH_TARGET_TANGENTIAL_OFFSET along
-     the same tangential axis (plus PUSH_OVERSHOOT) -- keeping the gripper orientation and
-     height fixed;
+  7. wait for Enter again, then push the gripper in a straight line PUSH_LENGTH_M long, in the
+     tangent direction turned PUSH_ANGLE_DEG toward the cap centre, keeping the gripper
+     orientation and height fixed;
   8. finally execute the LEGS list in order: each leg travels its offset at its angle
      counter-clockwise from the PREVIOUS leg's direction (the first is relative to the
      push direction; 90 = perpendicular/left), each descending LEG_DEPTH_STEP_M deeper below
      the cap plane than the leg before it (0.0 = all at the same height).
 """
 
+import argparse
 import asyncio
 import json
 import os
@@ -51,7 +53,6 @@ import sys
 import threading
 import time
 
-import cv2
 import numpy as np
 import rerun as rr
 from airo_camera_toolkit.cameras.realsense.realsense import Realsense
@@ -65,13 +66,10 @@ from calibrate_and_hover_bottle import (
     RIGHT_ROBOT_IP,
     compute_hover_pose_above_bottle,
     get_bottle_cap_pose_in_base_left,
-    orthonormalize_rotation,
     tcp_left_to_camera,
 )
 from camera_utils import freeze_auto_exposure
-from lid_touch_point_annotator import OUTPUT_DIR
 from motion_constants import (
-    APPROACH_OFFSET,
     DEPTH_NUDGE_M,
     GRIPPER_YAW_DEG,
     LEGS,
@@ -80,12 +78,13 @@ from motion_constants import (
     MOVE_SPEED,
     OPEN_DWELL_S,
     OPEN_POLL_S,
-    PUSH_OVERSHOOT,
-    PUSH_TARGET_TANGENTIAL_OFFSET,
+    PUSH_ANGLE_DEG,
+    PUSH_LENGTH_M,
     RADIAL_OUTWARD_OFFSET,
     RETRACT_LIFT_METERS,
     STOP_LEGS_WHEN_OPEN,
     TANGENTIAL_OFFSET,
+    TURN_DURING_LEGS,
     YAW_SPEED,
 )
 from open_bottle_agent import (
@@ -96,8 +95,13 @@ from open_bottle_agent import (
     RIGHT_NEUTRAL_JOINTS,
     generate_reachable_bottle_poses,
 )
-from open_bottle_demo import verify_or_correct_touch_point
-from touch_point_detector import detect_touch_point
+from open_bottle_demo import (
+    pixel_to_point_on_cap_plane,
+    project_point_to_pixel,
+    resolve_touch_point,
+    save_touch_point_sample,
+)
+from opening_motion import plan_opening_motion
 
 # This script is run with bottle_experiment/ as sys.path[0], so the repo root has to be added
 # explicitly to reach the package. splits.py is imported, never copied: a hand-maintained
@@ -110,6 +114,8 @@ if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 from robot_imitation_glue.hardware.bottle_sensor import (  # noqa: E402
     PER_CHANNEL_THRESHOLDS,
+    channels_open,
+    is_cap_open,
     SENSOR_CHECKPOINTS,
 )
 from robot_imitation_glue.ur5station.bottle.splits import (  # noqa: E402
@@ -318,7 +324,7 @@ def _check_checkpoint(sensor_logger, event_name):
 
 
 def _cap_is_open_sustained(sensor_logger, dwell_s=OPEN_DWELL_S):
-    """True only if all three channels hold at/above their threshold for `dwell_s` straight.
+    """True only if the deciding channels (OPEN_CHANNELS: S1, S2) hold at/above threshold for `dwell_s` straight.
 
     The dwell is the point: run_0017's S2 rose for ~1.2 s and then fell back as the later legs
     pressed the loose cap down again, which one debounced reading would have called open. A None
@@ -334,14 +340,15 @@ def _cap_is_open_sustained(sensor_logger, dwell_s=OPEN_DWELL_S):
                 "cap-sensor stream is stale or disconnected -- cannot tell whether the cap is open; "
                 "stop-on-open and the checkpoints are both meaningless against a dead link."
             )
-        if not all(reading[c] >= PER_CHANNEL_THRESHOLDS[c] for c in range(len(PER_CHANNEL_THRESHOLDS))):
+        if not is_cap_open(reading):
             return False
         if time.monotonic() >= deadline:
             return True
         time.sleep(OPEN_POLL_S)
 
 
-def _build_motion_segments(ur_left, sensor_logger, yawed_rotation, hover_position, approach_position, push_target, leg_targets):
+def _build_motion_segments(ur_left, sensor_logger, yawed_rotation, hover_position, approach_position, push_target, leg_targets,
+                           leg_rotations):
     """The motion as an ordered list of (label, execute_fn, checkpoint_event_or_None).
     execute_fn(depth_offset) performs that segment's move(s) -- possibly deeper than
     originally planned -- and returns the pose reached.
@@ -378,10 +385,17 @@ def _build_motion_segments(ur_left, sensor_logger, yawed_rotation, hover_positio
         sensor_logger.log_event("push_end", target=push_pose[:3, 3].tolist())
         return push_pose
 
-    def make_do_leg(leg_number, angle_deg, offset, leg_target, event_name):
+    def make_do_leg(leg_number, angle_deg, offset, leg_target, leg_rotation, event_name):
         def do_leg(depth_offset):
+            # the gripper turns with the path (opening_motion): during the leg itself, or -- with
+            # TURN_DURING_LEGS off -- in place first, at YAW_SPEED
+            if not TURN_DURING_LEGS:
+                turn_pose = np.eye(4)
+                turn_pose[:3, :3] = leg_rotation
+                turn_pose[:3, 3] = ur_left.get_tcp_pose()[:3, 3]
+                ur_left.move_linear_to_tcp_pose(turn_pose, linear_speed=YAW_SPEED).wait()
             leg_pose = np.eye(4)
-            leg_pose[:3, :3] = yawed_rotation
+            leg_pose[:3, :3] = leg_rotation
             leg_pose[:3, 3] = leg_target + depth_offset
             print(f"[push] leg {leg_number} ({angle_deg:.0f} deg from previous direction, {offset * 100:.0f}cm, {(leg_number - 1) * LEG_DEPTH_STEP_M * 100:.1f}cm deeper than the push) to {np.round(leg_pose[:3, 3], 4)}")
             ur_left.move_linear_to_tcp_pose(leg_pose, linear_speed=MOVE_SPEED).wait()
@@ -395,11 +409,11 @@ def _build_motion_segments(ur_left, sensor_logger, yawed_rotation, hover_positio
     # restart instead of resuming from the last good leg.
     push_ckpt = "push_end" if (VERIFY_CHECKPOINTS and "push_end" in SENSOR_CHECKPOINTS) else None
     segments = [("approach", do_approach, None), ("push", do_push, push_ckpt)]
-    for i, ((angle_deg, offset), leg_target) in enumerate(zip(LEGS, leg_targets)):
+    for i, ((angle_deg, offset), leg_target, leg_rotation) in enumerate(zip(LEGS, leg_targets, leg_rotations)):
         event_name = f"leg_{i + 2}_end"
         gated = VERIFY_CHECKPOINTS and event_name in SENSOR_CHECKPOINTS
         checkpoint = event_name if gated else None
-        segments.append((f"leg{i + 2}", make_do_leg(i + 2, angle_deg, offset, leg_target, event_name), checkpoint))
+        segments.append((f"leg{i + 2}", make_do_leg(i + 2, angle_deg, offset, leg_target, leg_rotation, event_name), checkpoint))
     return segments
 
 
@@ -413,12 +427,12 @@ def _previous_checkpoint_segment_index(segments, segment_index):
 
 def run_opening_motion_with_retry(
     ur_left, sensor_logger, hover_pose, yawed_rotation, hover_position,
-    approach_position, push_target, leg_targets, cap_normal,
+    approach_position, push_target, leg_targets, leg_rotations, cap_normal,
 ):
     """Execute the yaw + descend + push + LEGS motion, gated by sensor-verified checkpoints
-    (leg_2_end, leg_3_end -- see SENSOR_CHECKPOINTS), pressing DEPTH_NUDGE_M
-    deeper into the cap on every retry (an identical replay would very likely just fail
-    identically) -- up to MAX_MOTION_RETRIES times.
+    (which events gate which channels is SENSOR_CHECKPOINTS' to say -- imported, never mirrored
+    here), pressing DEPTH_NUDGE_M deeper into the cap on every retry (an identical replay would
+    very likely just fail identically) -- up to MAX_MOTION_RETRIES times.
 
     Recovery is cascading rather than always a full restart: on a failed checkpoint, retract
     to the hover pose and RE-CHECK the PRECEDING checkpoint's sensor.
@@ -427,17 +441,23 @@ def run_opening_motion_with_retry(
         before it (they're still fine, no need to redo them).
       - If the earlier checkpoint has ALSO lost its grip, the problem runs deeper than just
         this leg -- restart the whole motion from the grip point.
-      - The first checkpoint (leg_2_end) has no earlier checkpoint to fall back on, so its
+      - The first checkpoint in the motion has no earlier checkpoint to fall back on, so its
         failure always triggers a full restart.
 
-    Returns True once leg_3_end -- the checkpoint gating the last channels to uncover (S1 and S2)
-    -- passes, False if MAX_MOTION_RETRIES is exhausted first.
+    Returns True once the LAST gated checkpoint in SENSOR_CHECKPOINTS passes (located by
+    position, not by a hardcoded event name, so map re-maps like 2026-10-07's S2
+    leg_3_end -> leg_5_end cannot silently break it), False if MAX_MOTION_RETRIES is exhausted
+    first.
     """
-    segments = _build_motion_segments(ur_left, sensor_logger, yawed_rotation, hover_position, approach_position, push_target, leg_targets)
+    segments = _build_motion_segments(ur_left, sensor_logger, yawed_rotation, hover_position, approach_position, push_target, leg_targets,
+                                      leg_rotations)
 
     attempt = 0
     resume_index = 0
 
+    # Stop-on-open needs every channel to have read covered before the push; a channel already open at
+    # the grip point would make "all channels open" true as soon as the others open (see channels_open).
+    stop_on_open_armed = True
     while True:
         depth_offset = -attempt * DEPTH_NUDGE_M * cap_normal
 
@@ -455,6 +475,14 @@ def run_opening_motion_with_retry(
             reached = execute_fn(depth_offset)
 
             if segment_index == 0 and attempt == 0:
+                reading = sensor_logger.current_reading()
+                already_open = channels_open(reading) if reading is not None else []
+                if already_open:
+                    stop_on_open_armed = False
+                    names = ", ".join(f"S{c} ({reading[c]:.2f} V)" for c in already_open)
+                    print(f"[sensor] WARNING {names} already read(s) OPEN at the grip point, before the push -- is "
+                          "the cap fully closed? Stop-on-open is OFF for this run: all legs will run.")
+                    sensor_logger.log_event("open_before_push", channels=already_open)
                 input("Press Enter to start the opening motion (Ctrl+C to abort)...")
 
             # Same rule as collect_data_bottle: once every channel holds open, the rest of the leg
@@ -463,7 +491,7 @@ def run_opening_motion_with_retry(
             # while any channel is still covered.
             # STOP_LEGS_WHEN_OPEN stays effective even with VERIFY_CHECKPOINTS off: skipping
             # provably post-open travel does not rewrite the geometry the way a deeper retry does.
-            if STOP_LEGS_WHEN_OPEN and _cap_is_open_sustained(sensor_logger):
+            if STOP_LEGS_WHEN_OPEN and stop_on_open_armed and _cap_is_open_sustained(sensor_logger):
                 stopped_open = True
                 skipped = len(segments) - segment_index - 1
                 sensor_logger.log_event("stop_on_open", after_segment=label, skipped_segments=skipped)
@@ -482,7 +510,7 @@ def run_opening_motion_with_retry(
             # the cap plane, so ending the motion early still has to disengage it before anything
             # else can be read or recorded.
             lift_pose = np.eye(4)
-            lift_pose[:3, :3] = yawed_rotation
+            lift_pose[:3, :3] = reached[:3, :3]  # keep the leg's turn: a straight lift, no rotation
             lift_pose[:3, 3] = reached[:3, 3] + RETRACT_LIFT_METERS * cap_normal
             print(f"[move] lifting {RETRACT_LIFT_METERS * 100:.0f}cm off the cap")
             ur_left.move_linear_to_tcp_pose(lift_pose, linear_speed=MOVE_SPEED).wait()
@@ -514,66 +542,6 @@ def run_opening_motion_with_retry(
                 print(f"[verify] '{previous_checkpoint_name}' has also failed -- restarting from the grip point")
 
         attempt += 1
-
-
-def pixel_to_point_on_cap_plane(pixel_xy, intrinsics, camera_pose_in_base, cap_pose_in_base):
-    """Back-project an image pixel onto the bottle-cap plane, in ur_left base frame.
-
-    The detection gives only a 2D pixel; its depth is recovered by intersecting the
-    camera ray with the cap plane (origin = cap center, normal = cap z-axis), both known
-    in the base frame through ur_right's kinematics + DEFAULT_TCP_RIGHT_TO_BOTTLE.
-    """
-    ray_camera = np.linalg.inv(intrinsics) @ np.array([pixel_xy[0], pixel_xy[1], 1.0])
-    ray_base = camera_pose_in_base[:3, :3] @ ray_camera
-    origin = camera_pose_in_base[:3, 3]
-
-    cap_center = cap_pose_in_base[:3, 3]
-    cap_normal = cap_pose_in_base[:3, 2]
-    t = cap_normal.dot(cap_center - origin) / cap_normal.dot(ray_base)
-    return origin + t * ray_base
-
-
-def project_point_to_pixel(point_in_base, intrinsics, camera_pose_in_base):
-    """Project a 3D point (base frame) back into image pixel coordinates, for rerun display."""
-    point_in_camera = np.linalg.inv(camera_pose_in_base) @ np.append(point_in_base, 1.0)
-    pixel = intrinsics @ point_in_camera[:3]
-    return pixel[:2] / pixel[2]
-
-
-def rotation_about_axis(axis, angle_rad):
-    """Rodrigues rotation matrix about a unit axis."""
-    axis = axis / np.linalg.norm(axis)
-    kx, ky, kz = axis
-    K = np.array([[0, -kz, ky], [kz, 0, -kx], [-ky, kx, 0]])
-    return np.eye(3) + np.sin(angle_rad) * K + (1 - np.cos(angle_rad)) * (K @ K)
-
-
-def compute_yawed_gripper_orientation(cap_normal, reference_direction, yaw_deg):
-    """Gripper orientation facing the cap (TCP z-axis = -cap normal) with a prescribed yaw
-    about that z-axis: at yaw 0 the gripper's x-axis points along `reference_direction`
-    (touch point -> bottle center); positive yaw rotates it counter-clockwise about the
-    cap's outward normal."""
-    z_axis = -cap_normal
-    x_axis = rotation_about_axis(cap_normal, np.radians(yaw_deg)) @ reference_direction
-    x_axis = x_axis - z_axis * z_axis.dot(x_axis)  # keep exactly perpendicular to z
-    x_axis *= -1
-    x_axis /= np.linalg.norm(x_axis)
-    y_axis = np.cross(z_axis, x_axis)
-    return orthonormalize_rotation(np.column_stack([x_axis, y_axis, z_axis]))
-
-
-def save_touch_point_sample(image_bgr, overlay, hover_height, click_xy, detected_xy):
-    """Append this frame + human-verified touch point to the lid_touch_point_debug dataset,
-    in the same sample_NNNN format the annotation tool writes (so all evaluation tooling
-    keeps working on the combined set)."""
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
-    sample_index = len([n for n in os.listdir(OUTPUT_DIR) if n.endswith("_raw.jpg")])
-    prefix = os.path.join(OUTPUT_DIR, f"sample_{sample_index:04d}")
-    cv2.imwrite(f"{prefix}_raw.jpg", image_bgr)
-    cv2.imwrite(f"{prefix}_overlay.jpg", overlay)
-    with open(f"{prefix}.json", "w") as f:
-        json.dump({"height": hover_height, "click_xy": list(click_xy), "detected_xy": list(detected_xy) if detected_xy is not None else None}, f)
-    print(f"[dataset] saved {prefix}  height={hover_height:.3f}  click={click_xy}  detected={detected_xy}")
 
 
 def _run_episode(sensor_logger, camera, intrinsics, ur_left, ur_right, tcp_right_pose, meta):
@@ -623,62 +591,24 @@ def _run_episode(sensor_logger, camera, intrinsics, ur_left, ur_right, tcp_right
     image_rgb = camera.get_rgb_image_as_int()
     image_bgr = ImageConverter.from_numpy_int_format(image_rgb).image_in_opencv_format
 
-    def grab_and_detect():
-        # fresh grab + detection for 't' at the verify window (the collector's blurred-frame fix);
-        # the arm is parked at the hover pose, so hover_height and the camera pose stay valid.
-        rgb = camera.get_rgb_image_as_int()
-        bgr = ImageConverter.from_numpy_int_format(rgb).image_in_opencv_format
-        return bgr, detect_touch_point(bgr, hover_height)
+    def grab_frame():
+        # fresh grab for 't' at the verify window (the collector's blurred-frame fix); the arm is
+        # parked at the hover pose, so hover_height and the camera pose stay valid.
+        return ImageConverter.from_numpy_int_format(camera.get_rgb_image_as_int()).image_in_opencv_format
 
-    detected_pixel = detect_touch_point(image_bgr, hover_height)
-
-    # verify/correct interactively, and grow the labeled dataset with this frame:
-    # click_xy is the human-verified ground truth (the accepted detection, or the correction)
-    touch_pixel, corrected_pixel, verify_overlay, image_bgr, detected_pixel = verify_or_correct_touch_point(
-        image_bgr, detected_pixel, regrab=grab_and_detect
-    )
-    save_touch_point_sample(image_bgr, verify_overlay, hover_height, touch_pixel, detected_pixel)
+    # the learned detector's point, with the verify/click window only when it is unsure
+    touch_pixel, verify_overlay, image_bgr, detected_pixel, human_checked = resolve_touch_point(image_bgr, grab_frame)
+    if human_checked:  # grow the labeled dataset with frames a person looked at
+        save_touch_point_sample(image_bgr, verify_overlay, hover_height, touch_pixel, detected_pixel)
+    corrected_pixel = touch_pixel if tuple(touch_pixel) != tuple(detected_pixel) else None
     if corrected_pixel is not None:
         print(f"[verify] using corrected touch point {touch_pixel} (detection was {detected_pixel})")
 
     touch_point = pixel_to_point_on_cap_plane(touch_pixel, intrinsics, camera_pose_in_base, cap_pose)
 
-    # radially-outward direction in the cap plane: from the cap center through the touch point
-    outward = touch_point - cap_center
-    outward /= np.linalg.norm(outward)
-
-    # tangent at the touch point, counter-clockwise about the cap's outward normal --
-    # "left" of the touch point as seen along the old circular motion's direction
-    tangent = np.cross(cap_normal, outward)
-    tangent /= np.linalg.norm(tangent)
-
-    # the gripper targets the touch point shifted radially outward (past the cap edge)
-    # AND tangentially to the left
-    grip_point = touch_point + RADIAL_OUTWARD_OFFSET * outward + TANGENTIAL_OFFSET * tangent
-
-    # opening motion: straight-line push from the grip point toward the push end point --
-    # the cap center shifted along the same tangential axis -- at the gripper's height
-    push_end = cap_center + PUSH_TARGET_TANGENTIAL_OFFSET * tangent
-    push_direction = push_end - grip_point
-    push_direction /= np.linalg.norm(push_direction)
-    approach_position = grip_point + APPROACH_OFFSET * cap_normal
-    push_target = push_end + APPROACH_OFFSET * cap_normal + PUSH_OVERSHOOT * push_direction
-
-    # legs after the push: each direction is the previous leg's direction rotated by the
-    # leg's angle counter-clockwise about the cap normal, and each leg ends LEG_DEPTH_STEP_M
-    # deeper than the previous one. leg_ends are the cap-plane points (for the image preview),
-    # leg_targets the actually-descending points the robot moves to.
-    leg_ends, leg_targets = [], []
-    leg_direction = push_direction
-    leg_end, leg_target = push_end, push_target
-    for angle_deg, offset in LEGS:
-        leg_direction = rotation_about_axis(cap_normal, np.radians(angle_deg)) @ leg_direction
-        leg_direction -= cap_normal * cap_normal.dot(leg_direction)  # keep exactly in-plane
-        leg_direction /= np.linalg.norm(leg_direction)
-        leg_end = leg_end + offset * leg_direction
-        leg_target = leg_target + offset * leg_direction - LEG_DEPTH_STEP_M * cap_normal
-        leg_ends.append(leg_end)
-        leg_targets.append(leg_target)
+    plan = plan_opening_motion(cap_pose, touch_point)
+    grip_point, push_end, push_target = plan["grip_point"], plan["push_end"], plan["push_target"]
+    approach_position, leg_ends, leg_targets = plan["approach_position"], plan["leg_ends"], plan["leg_targets"]
 
     # --- rerun: image with detected touch point, grip point, push target + 3D view ---
     grip_pixel = project_point_to_pixel(grip_point, intrinsics, camera_pose_in_base)
@@ -703,14 +633,14 @@ def _run_episode(sensor_logger, camera, intrinsics, ur_left, ur_right, tcp_right
 
     print(f"[detect] touch pixel={touch_pixel}  touch point (base frame)={np.round(touch_point, 4)}")
     print(f"[detect] grip point ({RADIAL_OUTWARD_OFFSET * 100:.1f}cm outward + {TANGENTIAL_OFFSET * 100:.1f}cm left of touch point, base frame)={np.round(grip_point, 4)}")
-    print(f"[detect] push end ({PUSH_TARGET_TANGENTIAL_OFFSET * 100:.1f}cm left of cap center)  push target (base frame)={np.round(push_target, 4)}")
+    print(f"[detect] push {PUSH_LENGTH_M * 100:.1f}cm at {PUSH_ANGLE_DEG:.1f} deg toward the cap centre  push target (base frame)={np.round(push_target, 4)}")
     input("Check the detection in rerun. Press Enter to move the gripper to the grip point (Ctrl+C to abort)...")
 
-    yawed_rotation = compute_yawed_gripper_orientation(cap_normal, -outward, GRIPPER_YAW_DEG)
+    yawed_rotation = plan["yawed_rotation"]
 
     opened = run_opening_motion_with_retry(
         ur_left, sensor_logger, hover_pose, yawed_rotation, start_pose[:3, 3],
-        approach_position, push_target, leg_targets, cap_normal,
+        approach_position, push_target, leg_targets, plan["leg_rotations"], cap_normal,
     )
     if VERIFY_CHECKPOINTS:
         print(f"[done] opening motion {'succeeded' if opened else 'FAILED'}")
@@ -727,7 +657,7 @@ def _run_episode(sensor_logger, camera, intrinsics, ur_left, ur_right, tcp_right
     sensor_logger.log_event("retreat_home")
 
 
-def _main_body(sensor_logger):
+def _main_body(sensor_logger, pose_index=None, runs=1):
     """Record one calibration run per pose of the POSE_SPLIT split.
 
     The pose list is built by exactly the call collect_data_bottle_opening makes -- same
@@ -758,14 +688,20 @@ def _main_body(sensor_logger):
         f"Press Enter to generate the '{POSE_SPLIT}' split's {SPLIT_N_POSES[POSE_SPLIT]} poses."
     )
     rng = np.random.default_rng(RANDOM_SEED + SPLIT_SEED_OFFSETS[POSE_SPLIT])
+    n_generate = SPLIT_N_POSES[POSE_SPLIT] if pose_index is None else pose_index + 1
     bottle_poses = generate_reachable_bottle_poses(
-        SPLIT_N_POSES[POSE_SPLIT], ur_left, ur_right, rng, blacklist=POSE_BLACKLIST[POSE_SPLIT]
+        n_generate, ur_left, ur_right, rng, blacklist=POSE_BLACKLIST[POSE_SPLIT]
     )
     if not bottle_poses:
         raise SystemExit(f"[generate] no reachable poses for split '{POSE_SPLIT}' -- nothing to calibrate")
-    print(f"[generate] recording {len(bottle_poses)} calibration runs, one per '{POSE_SPLIT}' pose")
+    # --pose-index: the same pose (same 1-based slot number as the full run) repeated `runs` times,
+    # for tuning the motion on one pose before trying it on the others.
+    schedule = (list(enumerate(bottle_poses, start=1)) * runs if pose_index is None
+                else [(pose_index + 1, bottle_poses[pose_index])] * runs)
+    print(f"[generate] recording {len(schedule)} calibration runs on '{POSE_SPLIT}' pose(s) "
+          f"{sorted({slot for slot, _ in schedule})}")
 
-    for slot, (tcp_right_pose, planned_cap_pose) in enumerate(bottle_poses, start=1):
+    for slot, (tcp_right_pose, planned_cap_pose) in schedule:
         meta = {
             "split": POSE_SPLIT,
             "pose_slot": slot,
@@ -785,6 +721,13 @@ def _main_body(sensor_logger):
 
 
 if __name__ == "__main__":
+    # parsed before anything connects, so --help does not open the BLE link or rerun
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--pose-index", type=int, default=None,
+                        help=f"only this (0-based) pose of the '{POSE_SPLIT}' split, instead of all of them")
+    parser.add_argument("--runs", type=int, default=1, help="runs per pose (close the cap by hand in between)")
+    args = parser.parse_args()
+
     rr.init("open_bottle_demo", spawn=True)
 
     # start the sensor BLE connection first -- it's the slowest thing to set up (scan +
@@ -795,6 +738,6 @@ if __name__ == "__main__":
     sensor_logger.start()
 
     try:
-        _main_body(sensor_logger)
+        _main_body(sensor_logger, pose_index=args.pose_index, runs=args.runs)
     finally:
         sensor_logger.stop()

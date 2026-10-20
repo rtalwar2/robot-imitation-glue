@@ -18,9 +18,9 @@ subject to constraints --
 Then loops over the accepted poses. For each pose:
   1. ur_left retreats to LEFT_HOME_JOINTS, ur_right moves the bottle to the pose;
   2. ur_left moves to the hover pose above the cap;
-  3. frame capture + touch-point detection + the same click-to-correct verification
-     window as open_bottle_demo -- every frame + verified point is saved to the
-     lid_touch_point_debug dataset (this loop is the dataset builder);
+  3. frame capture + the learned touch-point detector; when it is unsure, the same
+     click-to-correct verification window as open_bottle_demo, and that human-checked frame +
+     point is saved to the lid_touch_point_debug dataset;
   4. the planned motion is shown in rerun (per-pose timeline), Enter confirms;
   5. ur_left descends to the grip point WITH the GRIPPER_YAW_DEG yaw applied in the same
      move (rotation and translation interpolated together in one moveL);
@@ -34,7 +34,15 @@ it does not check the linear paths between waypoints or arm-arm collisions, so k
 hand near the e-stop as usual.
 """
 
+import hashlib
+import inspect
+import json
+import os
+from pathlib import Path
+
+import motion_constants
 import numpy as np
+import opening_motion
 import rerun as rr
 from airo_camera_toolkit.cameras.realsense.realsense import Realsense
 from airo_camera_toolkit.utils.image_converter import ImageConverter
@@ -51,26 +59,16 @@ from calibrate_and_hover_bottle import (
     tcp_left_to_camera,
 )
 from camera_utils import freeze_auto_exposure
-from motion_constants import (
-    APPROACH_OFFSET,
-    GRIPPER_YAW_DEG,
-    LEGS,
-    LEG_DEPTH_STEP_M,
-    MOVE_SPEED,
-    PUSH_OVERSHOOT,
-    PUSH_TARGET_TANGENTIAL_OFFSET,
-    RADIAL_OUTWARD_OFFSET,
-    TANGENTIAL_OFFSET,
-)
+from motion_constants import APPROACH_OFFSET, LEGS, MOVE_SPEED
 from open_bottle_demo import (
-    compute_yawed_gripper_orientation,
     pixel_to_point_on_cap_plane,
     project_point_to_pixel,
-    rotation_about_axis,
+    resolve_touch_point,
     save_touch_point_sample,
-    verify_or_correct_touch_point,
 )
-from touch_point_detector import detect_touch_point
+# plan_opening_motion / make_pose are re-exported from here for older importers (collect_data_bottle,
+# check_hover_center_bias); the geometry itself lives in opening_motion.py.
+from opening_motion import make_pose, plan_opening_motion, rotation_about_axis  # noqa: F401 (re-exported)
 
 RANDOM_SEED = 0
 N_POSES = 5  # how many valid poses to generate (and then execute)
@@ -98,7 +96,8 @@ LEFT_HOME_JOINTS = [ 0.06980903 ,-0.46889468, -1.61281288 ,-1.67641511 , 1.54615
 # arm always approaches from the same configuration instead of swinging directly between two
 # arbitrary poses. Stored as joints rather than a TCP pose on purpose: IK could otherwise pick a
 # different elbow/wrist branch and land in the very configuration the via-point exists to avoid.
-# The corresponding TCP pose in ur_right's base frame, for reference:
+# The corresponding TCP pose in ur_right's base frame, for reference (taught with the old 219.5 mm TCP
+# offset; ur_right's TCP is the bare flange since 2026-10-08, so the flange sits ~22 cm behind this):
 #   [[-0.158  0.023 -0.987 -0.591]
 #    [-0.987  0.01   0.158 -0.045]
 #    [ 0.014  1.     0.021  0.305]
@@ -107,60 +106,6 @@ RIGHT_NEUTRAL_JOINTS = [-0.177, -1.799, 2.27, -0.494, 1.555, 0.017]
 RIGHT_JOINT_SPEED = 0.2  # rad/s for ur_right's pose-to-pose moves
 LEFT_TRANSIT_JOINT_SPEED = 0.2  # rad/s for ur_left's home <-> hover transits
 RETREAT_SPEED = 0.03  # m/s for lifting off the cap after the motion
-
-
-def make_pose(rotation, position):
-    pose = np.eye(4)
-    pose[:3, :3] = rotation
-    pose[:3, 3] = position
-    return pose
-
-
-def plan_opening_motion(cap_pose, touch_point):
-    """The same geometry as open_bottle_demo's main, as a reusable function: from the cap
-    pose and a (real or hypothetical) touch point, compute the grip/push/leg points and
-    the yawed gripper orientation. Returns a dict; 'waypoint_poses' holds the 4x4 poses
-    the gripper actually visits, in order (approach, push target, leg targets)."""
-    cap_center = cap_pose[:3, 3]
-    cap_normal = cap_pose[:3, 2]
-
-    outward = touch_point - cap_center
-    outward = outward / np.linalg.norm(outward)
-    tangent = np.cross(cap_normal, outward)
-    tangent = tangent / np.linalg.norm(tangent)
-
-    grip_point = touch_point + RADIAL_OUTWARD_OFFSET * outward + TANGENTIAL_OFFSET * tangent
-    push_end = cap_center + PUSH_TARGET_TANGENTIAL_OFFSET * tangent
-    push_direction = push_end - grip_point
-    push_direction = push_direction / np.linalg.norm(push_direction)
-    approach_position = grip_point + APPROACH_OFFSET * cap_normal
-    push_target = push_end + APPROACH_OFFSET * cap_normal + PUSH_OVERSHOOT * push_direction
-
-    leg_ends, leg_targets = [], []
-    leg_direction = push_direction
-    leg_end, leg_target = push_end, push_target
-    for angle_deg, offset in LEGS:
-        leg_direction = rotation_about_axis(cap_normal, np.radians(angle_deg)) @ leg_direction
-        leg_direction -= cap_normal * cap_normal.dot(leg_direction)
-        leg_direction /= np.linalg.norm(leg_direction)
-        leg_end = leg_end + offset * leg_direction
-        leg_target = leg_target + offset * leg_direction - LEG_DEPTH_STEP_M * cap_normal
-        leg_ends.append(leg_end)
-        leg_targets.append(leg_target)
-
-    yawed_rotation = compute_yawed_gripper_orientation(cap_normal, -outward, GRIPPER_YAW_DEG)
-    waypoint_poses = [make_pose(yawed_rotation, p) for p in [approach_position, push_target, *leg_targets]]
-
-    return {
-        "grip_point": grip_point,
-        "push_end": push_end,
-        "push_target": push_target,
-        "leg_ends": leg_ends,
-        "leg_targets": leg_targets,
-        "approach_position": approach_position,
-        "yawed_rotation": yawed_rotation,
-        "waypoint_poses": waypoint_poses,
-    }
 
 
 def sample_cap_pose(rng):
@@ -195,7 +140,60 @@ def is_opening_motion_reachable(cap_pose, ur_left):
     return True
 
 
+# Generated pose lists are cached here, keyed by everything that decides them (see _pose_cache_key), so a
+# script restart loads the list in a second instead of re-running hundreds of IK checks. Set
+# BOTTLE_POSES_NO_CACHE=1 to force a fresh generation (e.g. after changing a robot's safety limits, which
+# the key cannot see).
+POSE_CACHE_DIR = Path(__file__).resolve().parents[1] / "outputs" / "pose_cache"
+
+
+def _pose_cache_key(n_poses, ur_left, ur_right, rng, blacklist):
+    """Fingerprint of every input of generate_reachable_bottle_poses: the request (count, blacklist, the
+    rng's exact state), the geometry it uses (grasp transform, base offset, hover height, sampling limits,
+    every motion constant -- the reachability check plans the whole motion), both controllers' TCP offsets
+    (IK depends on them), and the SOURCE of the functions that sample and check, so a code change also
+    invalidates the cache."""
+    functions = (generate_reachable_bottle_poses, sample_cap_pose, is_opening_motion_reachable,
+                 opening_motion.plan_opening_motion, compute_hover_pose_above_bottle)
+    payload = {
+        "n_poses": n_poses, "blacklist": sorted(blacklist), "rng": rng.bit_generator.state,
+        "grasp": DEFAULT_TCP_RIGHT_TO_BOTTLE.tolist(), "bases": BASE_LEFT_TO_BASE_RIGHT.tolist(),
+        "hover": HOVER_HEIGHT_METERS,
+        "sampling": [MAX_SAMPLE_ATTEMPTS, MAX_TILT_DEG, CAP_POSITION_MIN.tolist(), CAP_POSITION_MAX.tolist(),
+                     GRIPPER_AIM_MAX_DEG, BOTTLE_RIM_RADIUS, N_TOUCH_ANGLE_SAMPLES],
+        "motion": {k: v for k, v in vars(motion_constants).items() if k.isupper()},
+        "tcp_offsets": [list(ur_left.rtde_control.getTCPOffset()), list(ur_right.rtde_control.getTCPOffset())],
+        "code": [inspect.getsource(f) for f in functions],
+    }
+    return hashlib.sha1(json.dumps(payload, sort_keys=True, default=str).encode()).hexdigest()[:16]
+
+
 def generate_reachable_bottle_poses(n_poses, ur_left, ur_right, rng, blacklist=()):
+    """generate_reachable_bottle_poses_uncached, through an on-disk cache (POSE_CACHE_DIR).
+
+    A cache hit returns exactly what generation would: the same poses in the same order, the blacklist
+    applied the same way (it is part of the key, so changing it regenerates), and `rng` left in the same
+    state generation would have left it in.
+    """
+    key = _pose_cache_key(n_poses, ur_left, ur_right, rng, blacklist)
+    cache_file = POSE_CACHE_DIR / f"poses_{key}.npz"
+    if cache_file.exists() and os.environ.get("BOTTLE_POSES_NO_CACHE") != "1":
+        cached = np.load(cache_file)
+        rng.bit_generator.state = json.loads(str(cached["rng_state_after"]))
+        poses = list(zip(cached["tcp_right"], cached["cap"]))
+        print(f"[generate] loaded {len(poses)}/{n_poses} poses from cache {cache_file.name} "
+              f"(blacklist {sorted(blacklist)}; BOTTLE_POSES_NO_CACHE=1 regenerates)")
+        return poses
+    poses = generate_reachable_bottle_poses_uncached(n_poses, ur_left, ur_right, rng, blacklist)
+    POSE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    np.savez(cache_file, tcp_right=np.array([t for t, _ in poses]).reshape(-1, 4, 4),
+             cap=np.array([c for _, c in poses]).reshape(-1, 4, 4),
+             rng_state_after=json.dumps(rng.bit_generator.state, default=int))
+    print(f"[generate] cached {len(poses)} poses as {cache_file.name}")
+    return poses
+
+
+def generate_reachable_bottle_poses_uncached(n_poses, ur_left, ur_right, rng, blacklist=()):
     """Sample cap poses until n_poses pass all constraints. Returns a list of
     (tcp_right_pose, cap_pose) tuples.
 
@@ -318,12 +316,15 @@ if __name__ == "__main__":
         image_rgb = camera.get_rgb_image_as_int()
         image_bgr = ImageConverter.from_numpy_int_format(image_rgb).image_in_opencv_format
 
-        detected_pixel = detect_touch_point(image_bgr, hover_height)
-        touch_pixel, corrected_pixel, verify_overlay, image_bgr, detected_pixel = verify_or_correct_touch_point(
-            image_bgr, detected_pixel
-        )
-        save_touch_point_sample(image_bgr, verify_overlay, hover_height, touch_pixel, detected_pixel)
-        if corrected_pixel is not None:
+        def grab_frame():
+            return ImageConverter.from_numpy_int_format(camera.get_rgb_image_as_int()).image_in_opencv_format
+
+        # the learned detector's point, with the verify/click window only when it is unsure
+        touch_pixel, verify_overlay, image_bgr, detected_pixel, human_checked = resolve_touch_point(image_bgr, grab_frame)
+        image_rgb = ImageConverter.from_opencv_format(image_bgr).image_in_numpy_int_format  # 't' may have retaken it
+        if human_checked:  # only frames a person looked at become training labels
+            save_touch_point_sample(image_bgr, verify_overlay, hover_height, touch_pixel, detected_pixel)
+        if tuple(touch_pixel) != tuple(detected_pixel):
             print(f"[verify] using corrected touch point {touch_pixel} (detection was {detected_pixel})")
 
         touch_point = pixel_to_point_on_cap_plane(touch_pixel, intrinsics, camera_pose_in_base, cap_pose)

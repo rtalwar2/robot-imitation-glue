@@ -29,7 +29,13 @@ SPLIT_N_POSES = {"train": 100, "val": 25, "test": 5}
 # poses that directly inflates the headline result. Reachability is already filtered by
 # is_tcp_pose_reachable / is_opening_motion_reachable, so anything reaching this list is a
 # judgement call worth writing down.
-POSE_BLACKLIST = {"train": [], "val": [], "test": [0]}
+# test 9, 10, 19, 23 (2026-10-12, generic_50ep eval): the poses that were at the rollout the operator
+# stopped on -- 9 left-arm protective stop 4.4 s in, the rest rig problems of the pose as judged by the
+# operator. Entries are POSE INDICES (eval prints "pose index N" per rollout), not rollout numbers: after
+# one entry the two differ, and entering rollout numbers 17/20 first removed the already-evaluated poses
+# 17 and 20 instead of 19 and 23. With this list the test split's 20 poses are exactly the ones
+# generic_50ep was evaluated on (1-8, 11-18, 20, 21, 22, 24).
+POSE_BLACKLIST = {"train": [6,10,68], "val": [], "test": [0, 9, 10, 19, 23]}
 
 
 def split_for_dataset_name(dataset_name: str) -> str:

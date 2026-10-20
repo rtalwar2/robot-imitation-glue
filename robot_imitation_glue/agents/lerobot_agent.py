@@ -95,10 +95,24 @@ class LerobotAgent(BaseAgent):
         self.device = device
         self.observation_preprocessor = observation_preprocessor
         self.n_env_action_dims = n_env_action_dims
+        # UMI-style relative actions (DiffusionConfig.use_relative_actions): the policy outputs each action of a
+        # chunk in the frame of the pose observed when the chunk was PREDICTED. The diffusion policy predicts a
+        # chunk only when its action queue is empty and then pops one action per call, so that reference has
+        # to be cached here at prediction time -- lerobot's postprocessor runs per popped action and would only
+        # know the latest observation.
+        self.relative_actions = bool(getattr(policy.config, "use_relative_actions", False))
+        self._chunk_reference_state = None
 
     def get_action(self, observation):
+        """The next action: a tool-frame delta [xyz, rot6d] for delta policies, the ABSOLUTE target pose
+        [xyz, rot6d] in the base frame for relative-action policies. action_to_tcp_pose turns either into the
+        pose to command."""
         start_time = time.time()
         observation = self.observation_preprocessor(observation)
+        if self.relative_actions:
+            queue = self.policy._queues["action"] if self.policy._queues else None
+            if not queue:  # this call predicts a new chunk from THIS observation: its pose is the reference
+                self._chunk_reference_state = observation["observation.state"][..., :6].clone().cpu()
         end_time = time.time()
         logger.info(f"Lerobot agent observation preprocessor took {((end_time - start_time)*1000):.2f} ms")
         observation = {k: v.to(self.device) for k, v in observation.items()}
@@ -107,6 +121,10 @@ class LerobotAgent(BaseAgent):
             observation = self.preprocessor(observation)
             action,used_images ,attn_maps= self.policy.select_action(observation)
             action = self.postprocessor(action)
+            if self.relative_actions:
+                from lerobot.processor import relative_to_absolute_pose_actions
+
+                action = relative_to_absolute_pose_actions(action.cpu(), self._chunk_reference_state.reshape(1, -1))
             if self.n_env_action_dims is not None:
                 if action.shape[-1] < self.n_env_action_dims:
                     raise ValueError(
@@ -118,8 +136,24 @@ class LerobotAgent(BaseAgent):
             logger.info(f"Lerobot agent inference took {((time_end - time_start)*1000):.2f} ms")
         return action.squeeze(0).cpu().numpy(),used_images,attn_maps
 
+    def action_to_tcp_pose(self, action, current_pose):
+        """The 4x4 pose to command for an action from get_action, given the current TCP pose."""
+        if not self.relative_actions:
+            from robot_imitation_glue.collect_data_delta import policy_action_to_tcp_pose
+
+            return policy_action_to_tcp_pose(current_pose, action)
+        action = np.asarray(action, dtype=np.float64)
+        x = action[3:6] / np.linalg.norm(action[3:6])
+        y = action[6:9] - (action[6:9] @ x) * x
+        y /= np.linalg.norm(y)
+        pose = np.eye(4)
+        pose[:3, :3] = np.column_stack((x, y, np.cross(x, y)))
+        pose[:3, 3] = action[:3]
+        return pose
+
     def reset(self):
         self.policy.reset()
+        self._chunk_reference_state = None
 
 
 if __name__ == "__main__":

@@ -19,8 +19,9 @@ Identical eval path for every arm, by construction:
     Protocol §1.8: OOD varies only the appearance axis -- the pose distribution never changes
     between ID and OOD.
 
-Success: all three cap-sensor channels at or above their uncovered thresholds for
-SUCCESS_SUSTAIN_STEPS consecutive control steps. Sustained rather than instantaneous because
+Success: the deciding cap-sensor channels (OPEN_CHANNELS = S1, S2; S0 cannot separate closed from open,
+see hardware/bottle_sensor.py) at or above their thresholds for SUCCESS_SUSTAIN_STEPS consecutive control
+steps. Sustained rather than instantaneous because
 run_0006 shows transient above-threshold excursions before the real transition; a single-step
 criterion could score a failed rollout as success. Timeout: protocol §1.8 says 2x the median
 demonstration duration rounded up to the next 5 s -- provisionally 2x31.1 s = 62.2 -> 65 s default
@@ -49,16 +50,18 @@ from pathlib import Path
 import numpy as np
 import rerun as rr
 import torch
-from airo_robots.grippers.hardware.schunk_process import SchunkGripperProcess
 
 from robot_imitation_glue.agents.lerobot_agent import LerobotAgent, make_lerobot_policy_for_inference
 from robot_imitation_glue.collect_data_bottle import (
+    GRIPPER_GRASP_WIDTH_M,
+    GRIPPER_OPEN_WIDTH_M,
     RETRACT_LIFT_METERS,
+    _move_gripper_to,
     log_observation_to_rerun,
 )
-from robot_imitation_glue.collect_data_delta import policy_action_to_tcp_pose
 from robot_imitation_glue.dataset_recorder import LeRobotDatasetRecorder
-from robot_imitation_glue.hardware.bottle_sensor import PER_CHANNEL_THRESHOLDS, is_uncovered
+from robot_imitation_glue.hardware.bottle_sensor import is_cap_open
+from robot_imitation_glue.hardware.gripper_startup import GRIPPER_PORT_RIGHT, make_gripper
 from robot_imitation_glue.ur5station.bottle.splits import (
     POSE_BLACKLIST,
     SPLIT_SEED_OFFSETS,
@@ -94,12 +97,25 @@ from open_bottle_agent import (  # noqa: E402
 N_ENV_ACTION_DIMS = 9  # [delta_xyz(3), rot6d(6)] -- what the robot accepts, for EVERY arm
 CONTROL_FREQUENCY_HZ = 10
 
-# All three channels must read uncovered for this many consecutive control steps (0.5 s at 10 Hz).
+# The deciding channels (S1, S2) must read open for this many consecutive control steps (0.5 s at 10 Hz).
 SUCCESS_SUSTAIN_STEPS = 5
 
 # Abort guard: |drift-corrected force| above this on any axis means the policy is grinding into
 # something -- stop the rollout (scored as failure) instead of letting it push harder.
-MAX_ABS_FORCE_NEWTONS = 100.0
+# Twice the p95 per-episode peak of the 110 training episodes, expert + recovery (48.0 N; median 22.5,
+# mean 26.8, max 140.8 N). Was 52 N (2x the 90 expert demos' mean peak) until 2026-10-16: that cut at
+# demo-level pushing -- 4 of the 110 successful training episodes exceed it -- so it scored force rather
+# than failure; at 96 N it is a safety stop and success is decided by the sensors / timeout. The peak force
+# is in every eval dataset, so the 52 N would-have-aborted rate stays reportable as a secondary metric.
+MAX_ABS_FORCE_NEWTONS = 96.0
+# Largest drift-corrected force in the demos' first 12 steps (free air, descending from hover): 26.7 N.
+FREE_AIR_FORCE_LIMIT_NEWTONS = 27.0
+# Mean wrist-image brightness (0-1) at hover in the curve training data (bottle_9d_100, 70 episodes): p2.5-p97.5.
+# The camera runs auto-exposure, which cannot compensate strong daylight: the 2026-10-16/19 curve evals ran in two
+# lighting regimes (whole-rollout mean 0.53-0.57 with 15-25% saturated pixels vs 0.39-0.40 and the training data's
+# 0.38), confounded with the arm. Logged per rollout so lighting can be checked as a covariate; control the room
+# lighting instead of relying on this warning.
+HOVER_BRIGHTNESS_RANGE = (0.326, 0.618)
 
 
 def drain_pending_input() -> None:
@@ -167,11 +183,29 @@ def corrected_force(obs: dict) -> np.ndarray:
     return np.asarray(obs["ft"][:3], dtype=np.float32) - np.asarray(obs["ft_bias"][:3], dtype=np.float32)
 
 
+def retreat_left_arm(env, cap_normal) -> None:
+    """Lift off the cap along its normal, then go home; after a protective stop, let the operator clear it."""
+    while True:
+        try:
+            if not env.robot.rtde_control.isProgramRunning():
+                wait_for_enter("[retreat] the UR control script is not running: clear the protective stop on the "
+                               "LEFT arm's pendant, then press Enter (Ctrl+C to abort)...")
+                env.robot.rtde_control.reuploadScript()
+                time.sleep(1.0)
+            lift_pose = env.get_robot_pose_se3().copy()
+            lift_pose[:3, 3] = lift_pose[:3, 3] + RETRACT_LIFT_METERS * cap_normal
+            env.move_robot_to_tcp_pose(lift_pose, joint_speed=LEFT_TRANSIT_JOINT_SPEED)
+            env.robot.move_to_joint_configuration(LEFT_HOME_JOINTS, joint_speed=LEFT_TRANSIT_JOINT_SPEED).wait()
+            return
+        except Exception as error:  # noqa: BLE001 -- any failure here is handed to the operator
+            print(f"[retreat] failed: {error}")
+            wait_for_enter("[retreat] fix the LEFT arm (pendant / freedrive it clear of the cap), then press Enter to retry...")
+
+
 def run_rollout(env, agent, recorder, timeout_seconds: float, label: str) -> dict:
     """One policy rollout from the hover pose. Returns the result row for the results file."""
     control_period = 1.0 / CONTROL_FREQUENCY_HZ
     max_steps = int(timeout_seconds * CONTROL_FREQUENCY_HZ)
-    all_channels = list(range(len(PER_CHANNEL_THRESHOLDS)))
 
     agent.reset()
     recorder.start_episode()
@@ -189,6 +223,13 @@ def run_rollout(env, agent, recorder, timeout_seconds: float, label: str) -> dic
             outcome = "manual_stop"
             break
 
+        # A protective stop kills the UR's control script; every servo command after that is ignored
+        # ("RTDE control script is not running!") while the policy keeps "acting" -- end the rollout.
+        if not env.robot.rtde_control.isProgramRunning():
+            outcome = "robot_stopped"
+            print("[rollout] the UR control script stopped (protective stop?) -- ending the rollout")
+            break
+
         obs = env.get_observations()
 
         if np.abs(corrected_force(obs)).max() > MAX_ABS_FORCE_NEWTONS:
@@ -198,15 +239,15 @@ def run_rollout(env, agent, recorder, timeout_seconds: float, label: str) -> dic
 
         action, _used_images, _attn = agent.get_action(obs)
         current_pose = env.get_robot_pose_se3()
-        next_pose = policy_action_to_tcp_pose(current_pose, action)
+        next_pose = agent.action_to_tcp_pose(action, current_pose)  # delta or absolute target, per the policy
         recorder.record_step(obs, np.asarray(action, dtype=np.float64))
         env.act_tcp(next_pose, time.time() + control_period)
         steps += 1
 
         log_observation_to_rerun(obs, recording=True, n_episodes=recorder.n_recorded_episodes, label=label)
 
-        # Sustained-uncovered success check, on the reading recorded THIS step.
-        if is_uncovered(np.asarray(obs["bottle_sensor"]), all_channels):
+        # Sustained-open success check (the deciding channels, OPEN_CHANNELS), on the reading recorded THIS step.
+        if is_cap_open(np.asarray(obs["bottle_sensor"])):
             sustained += 1
             if sustained >= SUCCESS_SUSTAIN_STEPS:
                 outcome = "success"
@@ -224,8 +265,8 @@ def run_rollout(env, agent, recorder, timeout_seconds: float, label: str) -> dic
     success = outcome == "success"
     success_source = "sensors"
 
-    if outcome == "manual_stop":
-        print(f"[rollout] stopped by operator after {steps} steps ({duration:.1f}s)")
+    if outcome in ("manual_stop", "robot_stopped"):
+        print(f"[rollout] {outcome} after {steps} steps ({duration:.1f}s)")
         # The stop Enter is consumed by the poll; flush anything typed after it so the verdict
         # prompt can't be answered by a stray keystroke.
         drain_pending_input()
@@ -265,14 +306,35 @@ def main() -> None:
         "--timeout-seconds",
         type=float,
         default=65.0,
-        help="2x the median demonstration duration, rounded up to the next 5 s (provisionally 65 s; "
-        "the 31.1s median predates the 2026-10 recollection -- re-derive and pass explicitly)",
+        help="2x the median demonstration duration, rounded up to the next 5 s (65 s, fixed 2026-10-14 with "
+        "N = 70; use the same value for every config and condition)",
     )
     parser.add_argument(
         "--results",
         type=Path,
         default=Path("outputs/eval/bottle_results.json"),
         help="JSON file accumulating one row per rollout, across all configs and conditions",
+    )
+    parser.add_argument(
+        "--num-inference-steps",
+        type=int,
+        default=None,
+        help="override the checkpoint's DDIM denoising steps (default: its config, i.e. num_train_timesteps=100, "
+        "~440 ms per inference on the 4090; 16 steps ~70 ms). Changes the eval condition: tagged into the "
+        "config name, so it gets its own eval dataset and results rows",
+    )
+    parser.add_argument(
+        "--n-action-steps",
+        type=int,
+        default=None,
+        help="override how many actions of each predicted chunk are executed before re-planning (checkpoint: 8). "
+        "1 = re-plan every control step; only fits the 10 Hz loop with a short --num-inference-steps",
+    )
+    parser.add_argument(
+        "--tag",
+        default=None,
+        help="free-form suffix for a changed eval condition (e.g. 'caprot'), appended to the config name so "
+        "those rollouts get their own eval dataset and results rows",
     )
     args = parser.parse_args()
 
@@ -281,11 +343,17 @@ def main() -> None:
         (p.name for p in args.checkpoint.resolve().parents if p.parent.name == "bottle"),
         args.checkpoint.resolve().parent.name,
     )
+    if args.num_inference_steps is not None:
+        config_name += f"_ddim{args.num_inference_steps}"
+    if args.n_action_steps is not None:
+        config_name += f"_a{args.n_action_steps}"
+    if args.tag:
+        config_name += f"_{args.tag}"
     eval_dataset_name = f"eval_bottle_{config_name}_{args.condition}"
 
     print(f"[eval] config={config_name} condition={args.condition} split={args.split} n={args.n_rollouts}")
 
-    schunk = SchunkGripperProcess(usb_interface="/dev/serial/by-path/pci-0000:00:14.0-usb-0:7:1.0-port0,11,115200,8E1")
+    schunk = make_gripper(GRIPPER_PORT_RIGHT)
     env = BottleStation(
         schunk,
         with_instrumentation=False,
@@ -295,6 +363,17 @@ def main() -> None:
     )
 
     policy, lerobot_preprocessor, lerobot_postprocessor = make_lerobot_policy_for_inference(str(args.checkpoint))
+    if args.num_inference_steps is not None:
+        policy.config.num_inference_steps = args.num_inference_steps
+        policy.diffusion.num_inference_steps = args.num_inference_steps  # what conditional_sample reads
+    if args.n_action_steps is not None:
+        horizon, n_obs = policy.config.horizon, policy.config.n_obs_steps
+        if not 1 <= args.n_action_steps <= horizon - n_obs + 1:
+            raise ValueError(f"--n-action-steps must be in [1, {horizon - n_obs + 1}] (horizon {horizon}, n_obs_steps {n_obs})")
+        policy.config.n_action_steps = args.n_action_steps
+        policy.reset()  # the action queue's maxlen is taken from the config in reset()
+    print(f"[eval] inference: {policy.diffusion.num_inference_steps} DDIM steps, "
+          f"{policy.config.n_action_steps} action(s) executed per prediction")
     agent = LerobotAgent(
         policy,
         lerobot_preprocessor,
@@ -318,6 +397,10 @@ def main() -> None:
     bottle_poses = generate_reachable_bottle_poses(
         args.n_rollouts, env.robot, env.robot_right, rng, blacklist=POSE_BLACKLIST[args.split]
     )
+    # generate_reachable_bottle_poses numbers every constraint-passing pose and skips the blacklisted ones,
+    # so position k in bottle_poses is the k-th index NOT in the blacklist.
+    blacklisted = set(POSE_BLACKLIST[args.split])
+    pose_indices = [i for i in range(args.n_rollouts + len(blacklisted)) if i not in blacklisted][: args.n_rollouts]
     if len(bottle_poses) < args.n_rollouts:
         raise RuntimeError(f"only {len(bottle_poses)}/{args.n_rollouts} poses generated -- widen the sampling box")
 
@@ -327,18 +410,32 @@ def main() -> None:
 
     try:
         for rollout_index in range(already_done, args.n_rollouts):
-            print(f"\n===== rollout {rollout_index + 1}/{args.n_rollouts} ({config_name}, {args.condition}) =====")
+            print(f"\n===== rollout {rollout_index + 1}/{args.n_rollouts} ({config_name}, {args.condition}) -- "
+                  f"pose index {pose_indices[rollout_index]} (the number to put in POSE_BLACKLIST) =====")
             wait_for_enter("Press Enter to move the LEFT arm home (Ctrl+C to abort)...")
             env.robot.move_to_joint_configuration(LEFT_HOME_JOINTS, joint_speed=LEFT_TRANSIT_JOINT_SPEED).wait()
+            # Re-zero the UR's FT sensor first: on 2026-10-12 its offset had grown to ~40 N (home bias
+            # [32.9, -19.6, 7.1] vs ~[7, 3, 0] in the demos), and because that offset is fixed in the
+            # SENSOR frame it changed by ~42 N between home and hover -- a force-abort in free air.
+            env.robot.rtde_control.zeroFtSensor()
             # Same per-episode FT drift zeroing as collection: the policy trained on
             # drift-corrected FT, so it must see drift-corrected FT here.
             env.capture_ft_bias()
 
             tcp_right_pose, _planned_cap_pose = bottle_poses[rollout_index]
-            wait_for_enter("Press Enter to move the RIGHT arm to the rollout pose (Ctrl+C to abort)...")
-            print("[move] ur_right via the neutral pose")
+            # Same re-grasp as every collected episode (collect_data_bottle): at the neutral pose the fingers
+            # open, the bottle is handed back, then ur_right moves to the pose and closes on it. Without this
+            # the bottle would keep one grasp for all rollouts -- a presentation the policy never trained on.
+            wait_for_enter("Press Enter to move the RIGHT arm to its neutral pose and open the gripper (Ctrl+C to abort)...")
+            print("[move] ur_right to the neutral pose")
             env.move_right_to_joint_configuration(RIGHT_NEUTRAL_JOINTS, joint_speed=RIGHT_JOINT_SPEED)
+            print(f"[gripper] ur_right opening to {GRIPPER_OPEN_WIDTH_M:.3f} m")
+            # _move_gripper_to(env, GRIPPER_OPEN_WIDTH_M)
+            wait_for_enter("Close the cap, hold the bottle between the open fingers, then press Enter -- ur_right "
+                           "moves to the rollout pose and closes (Ctrl+C to abort)...")
             env.move_right_to_tcp_pose(tcp_right_pose, joint_speed=RIGHT_JOINT_SPEED)
+            print(f"[gripper] ur_right closing on the bottle at {GRIPPER_GRASP_WIDTH_M:.3f} m")
+            # _move_gripper_to(env, GRIPPER_GRASP_WIDTH_M)
 
             cap_pose = env.get_bottle_cap_pose()
             cap_normal = cap_pose[:3, 2]
@@ -346,6 +443,18 @@ def main() -> None:
             print(f"[move] ur_left to hover above the cap at {np.round(hover_pose[:3, 3], 4)}")
             env.move_robot_to_tcp_pose(hover_pose, joint_speed=LEFT_TRANSIT_JOINT_SPEED)
 
+            time.sleep(0.5)  # let the arm stop ringing
+            hover_force = np.abs(corrected_force(env.get_observations())).max()
+            print(f"[ft] free-air force at hover: {hover_force:.1f} N (demos: <= {FREE_AIR_FORCE_LIMIT_NEWTONS} N)")
+            if hover_force > FREE_AIR_FORCE_LIMIT_NEWTONS:
+                print("[ft] WARNING: the FT reading is off in free air -- the policy would see out-of-distribution force "
+                      "and the rollout may force-abort. Check the payload on the pendant, then Ctrl+C and restart.")
+            hover_brightness = float(np.asarray(env.get_observations()["wrist_image"]).mean() / 255.0)
+            print(f"[camera] wrist-image brightness at hover: {hover_brightness:.3f} "
+                  f"(training p2.5-p97.5: {HOVER_BRIGHTNESS_RANGE[0]}-{HOVER_BRIGHTNESS_RANGE[1]})")
+            if not HOVER_BRIGHTNESS_RANGE[0] <= hover_brightness <= HOVER_BRIGHTNESS_RANGE[1]:
+                print("[camera] WARNING: the scene is brighter/darker than any training episode -- check the room "
+                      "lighting (blinds, lamps) before this rollout.")
             wait_for_enter("Press Enter to hand control to the POLICY (Ctrl+C to abort)...")
             row = run_rollout(
                 env,
@@ -355,18 +464,15 @@ def main() -> None:
                 label=f"ROLLOUT {rollout_index + 1}/{args.n_rollouts} {config_name} {args.condition}",
             )
 
-            # Unrecorded retreat: lift off the cap along its normal, then home.
-            lift_pose = env.get_robot_pose_se3().copy()
-            lift_pose[:3, 3] = lift_pose[:3, 3] + RETRACT_LIFT_METERS * cap_normal
-            env.move_robot_to_tcp_pose(lift_pose, joint_speed=LEFT_TRANSIT_JOINT_SPEED)
-            env.robot.move_to_joint_configuration(LEFT_HOME_JOINTS, joint_speed=LEFT_TRANSIT_JOINT_SPEED).wait()
-
             row |= {
                 "config": config_name,
                 "checkpoint": str(args.checkpoint),
+                "num_inference_steps": int(policy.diffusion.num_inference_steps),
+                "n_action_steps": int(policy.config.n_action_steps),
                 "condition": args.condition,
                 "split": args.split,
                 "pose_index": rollout_index,
+                "hover_brightness": round(hover_brightness, 4),
                 "rollout_dataset": eval_dataset_name,
                 "timestamp": datetime.datetime.now().isoformat(timespec="seconds"),
             }
@@ -376,6 +482,10 @@ def main() -> None:
             existing = json.loads(args.results.read_text()) if args.results.exists() else []
             existing.append(row)
             args.results.write_text(json.dumps(existing, indent=2))
+
+            # Unrecorded retreat: lift off the cap along its normal, then home. AFTER the results row is
+            # written, so a robot that cannot retreat (protective stop) never loses a saved rollout's row.
+            retreat_left_arm(env, cap_normal)
 
             if rollout_index + 1 < args.n_rollouts:
                 wait_for_enter("Close the bottle by hand, then press Enter for the next rollout...")

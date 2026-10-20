@@ -22,10 +22,10 @@ import sys
 from pathlib import Path
 
 import numpy as np
-from airo_robots.grippers.hardware.schunk_process import SchunkGripperProcess
 
 from robot_imitation_glue.collect_data_bottle import collect_data_bottle_opening
 from robot_imitation_glue.dataset_recorder import LeRobotDatasetRecorder
+from robot_imitation_glue.hardware.gripper_startup import GRIPPER_PORT_LEFT, make_gripper
 from robot_imitation_glue.ur5station.bottle_station_env import BottleStation
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -49,7 +49,7 @@ from open_bottle_agent import RANDOM_SEED, generate_reachable_bottle_poses  # no
 MISSING_POSE_INDICES = [32, 33, 34]
 
 if __name__ == "__main__":
-    schunk = SchunkGripperProcess(usb_interface="/dev/serial/by-path/pci-0000:00:14.0-usb-0:7:1.0-port0,11,115200,8E1")
+    schunk = make_gripper(GRIPPER_PORT_LEFT)
 
     env = BottleStation(
         schunk,

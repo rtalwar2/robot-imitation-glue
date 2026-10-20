@@ -28,6 +28,9 @@ What each arm is:
                   init-verification row) only if it LOSES to `generic` at 100% ID -- a tie or a
                   win promotes it to a live arm, since either means the pretrained init this
                   design leans on was not shown to help.
+    generic_fusion  ABLATION, not a curve arm (2026-10-15). `generic` with ManiWAV's image x audio
+                  modality-attention fusion instead of concatenation (policy.fusion_mode). Run
+                  at 100% only, to check whether plain concatenation underuses the audio.
 
 Why the matrix was simplified: the design-A (encoder pretraining) vs design-C (auxiliary
 prediction) mechanism comparison is retired -- the mechanism itself comes from the colleague's
@@ -38,13 +41,11 @@ init makes this paper's comparison single-factor and de-confounds it.
 
 Two rules this generator still enforces:
 
-**Audio normalization for random-init arms is per LEVEL, never global.** `audio_norm_mean/std`
-for `from_scratch` come from that level's own `audio_stats.json` (written by
-prepare_datasets_bottle over exactly the episodes the level trains on). A single global value --
-e.g. the 100% run's stats reused at 25% -- hands a run statistics from episodes it never sees.
-The generic arms load AudioSet's own normalization constants, which are dataset-independent, so
-they have no leak surface; the rule exists to protect the random-init cell and survives the
-simplification unchanged.
+**Audio normalization is per LEVEL, never global, in every arm** (since 2026-10-15; before that
+only `from_scratch` used it). `audio_norm_mean/std` come from that level's own `audio_stats.json`
+(written by prepare_datasets_bottle over exactly the episodes the level trains on). A single global
+value -- e.g. the 100% run's stats reused at 25% -- hands a run statistics from episodes it never
+sees. Both curve arms of a level share the same stats, so the arm comparison is untouched.
 
 **Nothing is hand-edited into a generated config.** Change the generator, re-run, keep the parity
 assertion green.
@@ -55,23 +56,49 @@ Usage:
 
     # the verification cell (100% only, per the pre-registered rule):
     python -m robot_imitation_glue.ur5station.bottle.generate_configs --arms from_scratch --levels 100
+
+    # fixed-episode-count levels (prepare_datasets_bottle --episode-counts), e.g. finding N (protocol 1.6):
+    python -m robot_imitation_glue.ur5station.bottle.generate_configs --arms generic --levels 50ep,70ep,90ep
+
+    # suffixed levels (prepare_datasets_bottle --suffix), e.g. + recovery demos with relative actions:
+    python -m robot_imitation_glue.ur5station.bottle.generate_configs --arms generic \
+        --levels 50ep_recovery_rel,70ep_recovery_rel,90ep_recovery_rel --steps 150000
+
+A prepared dataset carrying action_representation.json (prepare_datasets_bottle --relative-actions) stores
+absolute target poses with RELATIVE action stats; its configs get policy.use_relative_actions = true. That is
+read from the dataset, not passed here, so a config can never disagree with the data it trains on.
 """
 
 import argparse
 import copy
 import json
+import re
 from pathlib import Path
 
 DATA_LEVELS = ("100", "75", "50", "25")
-ARMS = ("generic", "generic_c", "from_scratch")
+ARMS = ("generic", "generic_c", "from_scratch", "generic_fusion")
 
 DATASET_ROOT = "datasets/bottle_experiment/prepared"
 AUDIO_BACKBONE = "MIT/ast-finetuned-audioset-10-10-0.4593"
 IMAGENET_RESNET18 = "ResNet18_Weights.IMAGENET1K_V1"
 
-# AST's own AudioSet normalization, from the checkpoint's preprocessor_config.json.
-AUDIOSET_NORM_MEAN = -4.2677393
-AUDIOSET_NORM_STD = 4.5689974
+# AST's own AudioSet normalization (checkpoint preprocessor_config.json), for RAW Kaldi log-fbank.
+# NOT used for any arm since 2026-10-15: the recorded spectrograms are (fbank + 20) / 60
+# (SpectrogramSubscriberKaldi.get_spectogram, hardware/ipc_mic.py) of a waveform in ADC units, so
+# even mapped into the stored scale (0.2622 / 0.07615) they leave our audio ~+2.6 off-centre in the
+# AST's input space. Every arm now uses its level's own audio_stats.json, which with the encoder's
+# (x - mean) / (2 * std) reproduces AudioSet's normalized input distribution (mean 0, std 0.5) --
+# the AST authors' recipe for fine-tuning on a new dataset. Until 2026-10-15 the generic arms used
+# these raw constants on the stored scale: near-constant AST input, weights decayed to ~0, every
+# checkpoint ignored audio (protocol section 1.7).
+AUDIOSET_RAW_NORM_MEAN = -4.2677393
+AUDIOSET_RAW_NORM_STD = 4.5689974
+
+# AdamW (decoupled decay), as in Diffusion Policy and ManiWAV. lerobot's diffusion preset is "adam",
+# which adds the decay to the gradient; Adam's per-parameter normalization then shrinks any weight
+# with ~zero task gradient by ~lr per step regardless of the decay's size -- how the unused AST
+# weights reached ~1e-38. Hence use_policy_training_preset=False and the optimizer spelled out.
+WEIGHT_DECAY = 1e-6
 
 # Keys allowed to differ between arms. Anything else differing is a bug, not a decision.
 INTENDED_ARM_DIFFERENCES = {
@@ -88,6 +115,8 @@ INTENDED_ARM_DIFFERENCES = {
     # Exact key, not the subtree: the whole `policy.output_features` prefix would also excuse an
     # unintended `type` divergence. make_policy overwrites output_features from the dataset anyway.
     "policy.output_features.action.shape",
+    # generic_fusion only (an ablation, not a curve arm).
+    "policy.fusion_mode",
 }
 
 
@@ -148,11 +177,11 @@ def base_config(audio_norm_mean: float, audio_norm_std: float, time_dimension: i
         # rollouts per checkpoint per config, quietly multiplying the rollout budget.
         "save_checkpoint": True,
         "save_freq": steps,
-        "use_policy_training_preset": True,
+        "use_policy_training_preset": False,
         "optimizer": {
-            "type": "adam",
+            "type": "adamw",
             "lr": 1e-4,
-            "weight_decay": 1e-6,
+            "weight_decay": WEIGHT_DECAY,
             "grad_clip_norm": 10.0,
             "betas": [0.95, 0.999],
             "eps": 1e-8,
@@ -239,7 +268,7 @@ def base_config(audio_norm_mean: float, audio_norm_std: float, time_dimension: i
             "optimizer_lr": 1e-4,
             "optimizer_betas": [0.95, 0.999],
             "optimizer_eps": 1e-8,
-            "optimizer_weight_decay": 1e-6,
+            "optimizer_weight_decay": WEIGHT_DECAY,
             "scheduler_name": "cosine",
             "scheduler_warmup_steps": 500,
         },
@@ -250,6 +279,7 @@ def apply_arm(config: dict, arm: str, level: str) -> dict:
     config = copy.deepcopy(config)
     action_dims = 12 if arm == "generic_c" else 9
     dataset_name = f"bottle_{action_dims}d_{level}"
+    config["policy"]["use_relative_actions"] = (Path(DATASET_ROOT) / dataset_name / "action_representation.json").exists()
 
     config["dataset"]["repo_id"] = dataset_name
     config["dataset"]["root"] = f"{DATASET_ROOT}/{dataset_name}/"
@@ -260,15 +290,15 @@ def apply_arm(config: dict, arm: str, level: str) -> dict:
     # namespace as the button experiment's checkpoints (ramen-noodels/red_round_button_*).
     config["policy"]["repo_id"] = f"ramen-noodels/bottle_{arm}_{level}"
 
-    if arm in ("generic", "generic_c"):
+    if arm in ("generic", "generic_c", "generic_fusion"):
         config["policy"]["pretrained_backbone_weights"] = IMAGENET_RESNET18
         config["policy"]["pretrained_audio_weights"] = True
-        # Matched to the weights: these encoders expect their pretraining distribution. This is
-        # also why the generic arms carry no per-level stats leak surface -- AudioSet's constants
-        # know nothing about this task's episodes.
+        # Images matched to the ImageNet weights. Audio is not: our spectrogram scale differs from
+        # AudioSet's, so it uses the level's own stats (computed over exactly the level's episodes).
         config["dataset"]["use_imagenet_stats"] = True
-        config["policy"]["audio_norm_mean"] = AUDIOSET_NORM_MEAN
-        config["policy"]["audio_norm_std"] = AUDIOSET_NORM_STD
+        # Audio keeps the level's own stats from base_config (see AUDIOSET_RAW_NORM_MEAN).
+    if arm == "generic_fusion":
+        config["policy"]["fusion_mode"] = "modality_attention"
 
     return config
 
@@ -309,7 +339,7 @@ def main() -> None:
         "control + treatment, from_scratch is the verification cell (run it with --levels 100)",
     )
     parser.add_argument("--levels", default=",".join(DATA_LEVELS), help="comma-separated subset of 100,75,50,25")
-    parser.add_argument("--steps", type=int, default=100_000)
+    parser.add_argument("--steps", type=int, default=150_000)  # protocol 1.7, since 2026-10-14
     parser.add_argument("--output-dir", type=Path, default=Path(__file__).parent / "configs")
     args = parser.parse_args()
 
@@ -318,16 +348,16 @@ def main() -> None:
     if unknown:
         raise SystemExit(f"unknown arms {sorted(unknown)}; choose from {ARMS}")
     levels = tuple(entry.strip() for entry in args.levels.split(",") if entry.strip())
-    unknown_levels = set(levels) - set(DATA_LEVELS)
+    # A level is a protocol percentage (100/75/50/25) or a fixed episode count "<n>ep", as written by
+    # prepare_datasets_bottle --episode-counts; either way it names the prepared dataset bottle_<d>d_<level>.
+    unknown_levels = {level for level in levels if level not in DATA_LEVELS and not re.fullmatch(r"\d+ep(_\w+)?", level)}
     if unknown_levels:
-        raise SystemExit(f"unknown levels {sorted(unknown_levels)}; choose from {DATA_LEVELS}")
+        raise SystemExit(f"unknown levels {sorted(unknown_levels)}; choose from {DATA_LEVELS} or '<n>ep'")
 
     # Build EVERYTHING before writing ANYTHING: a missing stats file at level 75 must not leave a
     # freshly written level-100 config behind, or a partial (and easily stale) set gets trained.
     to_write = {}
-    for level in DATA_LEVELS:
-        if level not in levels:
-            continue
+    for level in levels:
         # Per-LEVEL base: audio normalization for the random-init cell comes from that level's own
         # episodes. One base for all arms at a level, so the parity check below compares like with
         # like.

@@ -8,25 +8,23 @@ Expected starting state (this script does NOT move to the start pose itself):
     (e.g. via calibrate_and_hover_bottle.py with HOVER_HEIGHT_METERS = 0.05).
 
 Flow:
-  1. grab a frame and run the touch-point detection;
-  2. show the detection in an OpenCV window for verification -- click to correct it if
-     it's wrong (Enter/y/space accepts, r undoes the correction, q/Esc aborts). The frame
-     + verified point are saved to the lid_touch_point_debug dataset either way, growing
-     the labeled set (a failed detection can be labeled by clicking manually);
+  1. grab a frame and run the learned touch-point detector (touch_point_keypoints/);
+  2. if it is confident (score >= MIN_SCORE) its point is used as is; otherwise the frame opens in
+     an OpenCV window to verify or correct it (Enter/y/space accepts, r undoes the correction,
+     q/Esc aborts), and that human-checked frame + point is saved to the lid_touch_point_debug
+     dataset -- model-only points are never saved, so the training labels stay human;
   3. back-project the verified pixel onto the cap plane (whose pose we know through
      DEFAULT_TCP_RIGHT_TO_BOTTLE) to get the 3D touch point;
-  4. compute the grip point: the touch point shifted RADIAL_OUTWARD_OFFSET radially
-     outward (away from the center, past the cap edge) AND TANGENTIAL_OFFSET to the
-     "left" -- along the cap-plane tangent, in the direction the old circular motion went
-     (counter-clockwise about the cap's outward normal);
+  4. plan the motion (opening_motion.plan_opening_motion): the grip point is the touch point
+     shifted RADIAL_OUTWARD_OFFSET radially outward AND TANGENTIAL_OFFSET to the "left" -- along
+     the cap-plane tangent, counter-clockwise about the cap's outward normal;
   5. show the image with all points + the planned push line in rerun, and wait for Enter;
   6. yaw the gripper in place about its own TCP z-axis to GRIPPER_YAW_DEG relative to the
      touch-point -> bottle-center axis (tune the constant), then move ur_left so the
      gripper is at the grip point, APPROACH_OFFSET along the cap normal;
-  7. wait for Enter again, then push the gripper in a straight line from the grip point
-     to the push end point -- the cap center shifted PUSH_TARGET_TANGENTIAL_OFFSET along
-     the same tangential axis (plus PUSH_OVERSHOOT) -- keeping the gripper orientation and
-     height fixed;
+  7. wait for Enter again, then push the gripper in a straight line PUSH_LENGTH_M long, in the
+     tangent direction turned PUSH_ANGLE_DEG toward the cap centre, keeping the gripper
+     orientation and height fixed;
   8. finally execute the LEGS list in order: each leg travels its offset at its angle
      counter-clockwise from the PREVIOUS leg's direction (the first is relative to the
      push direction; 90 = perpendicular/left), each descending LEG_DEPTH_STEP_M deeper below
@@ -48,25 +46,26 @@ from calibrate_and_hover_bottle import (
     RIGHT_ROBOT_IP,
     compute_hover_pose_above_bottle,
     get_bottle_cap_pose_in_base_left,
-    orthonormalize_rotation,
     tcp_left_to_camera,
 )
 from camera_utils import freeze_auto_exposure
 from lid_touch_point_annotator import OUTPUT_DIR, ClickState, draw_overlay
 from motion_constants import (
-    APPROACH_OFFSET,
     GRIPPER_YAW_DEG,
     LEGS,
     LEG_DEPTH_STEP_M,
     MOVE_SPEED,
-    PUSH_OVERSHOOT,
-    PUSH_TARGET_TANGENTIAL_OFFSET,
+    PUSH_ANGLE_DEG,
+    PUSH_LENGTH_M,
     RADIAL_OUTWARD_OFFSET,
     TANGENTIAL_OFFSET,
+    TURN_DURING_LEGS,
     YAW_SPEED,
 )
-from touch_point_detector import detect_touch_point
-import time
+from opening_motion import plan_opening_motion
+
+# True opens the verify window for every touch point, even when the learned detector is confident.
+VERIFY_EVERY_TOUCH_POINT = False
 
 
 def pixel_to_point_on_cap_plane(pixel_xy, intrinsics, camera_pose_in_base, cap_pose_in_base):
@@ -91,28 +90,6 @@ def project_point_to_pixel(point_in_base, intrinsics, camera_pose_in_base):
     point_in_camera = np.linalg.inv(camera_pose_in_base) @ np.append(point_in_base, 1.0)
     pixel = intrinsics @ point_in_camera[:3]
     return pixel[:2] / pixel[2]
-
-
-def rotation_about_axis(axis, angle_rad):
-    """Rodrigues rotation matrix about a unit axis."""
-    axis = axis / np.linalg.norm(axis)
-    kx, ky, kz = axis
-    K = np.array([[0, -kz, ky], [kz, 0, -kx], [-ky, kx, 0]])
-    return np.eye(3) + np.sin(angle_rad) * K + (1 - np.cos(angle_rad)) * (K @ K)
-
-
-def compute_yawed_gripper_orientation(cap_normal, reference_direction, yaw_deg):
-    """Gripper orientation facing the cap (TCP z-axis = -cap normal) with a prescribed yaw
-    about that z-axis: at yaw 0 the gripper's x-axis points along `reference_direction`
-    (touch point -> bottle center); positive yaw rotates it counter-clockwise about the
-    cap's outward normal."""
-    z_axis = -cap_normal
-    x_axis = rotation_about_axis(cap_normal, np.radians(yaw_deg)) @ reference_direction
-    x_axis = x_axis - z_axis * z_axis.dot(x_axis)  # keep exactly perpendicular to z
-    x_axis *= -1
-    x_axis /= np.linalg.norm(x_axis)
-    y_axis = np.cross(z_axis, x_axis)
-    return orthonormalize_rotation(np.column_stack([x_axis, y_axis, z_axis]))
 
 
 def verify_or_correct_touch_point(image_bgr, detected_pixel, regrab=None):
@@ -168,6 +145,49 @@ def verify_or_correct_touch_point(image_bgr, detected_pixel, regrab=None):
         elif key in (27, ord("q")):
             cv2.destroyAllWindows()
             raise SystemExit("Aborted at touch-point verification -- not moving.")
+
+
+_learned_detector = None
+
+
+def learned_touch_point(image_bgr):
+    """The learned detector's touch pixel and its confidence score (loaded on first use)."""
+    global _learned_detector
+    if _learned_detector is None:
+        from touch_point_keypoints.detector import TouchPointKeypointDetector
+
+        _learned_detector = TouchPointKeypointDetector()
+    x, y, score = _learned_detector.predict(image_bgr)
+    return (int(round(x)), int(round(y))), score
+
+
+def resolve_touch_point(image_bgr, grab_frame=None):
+    """The touch pixel to use: the learned detector's, with the click window only when it is unsure.
+
+    Below touch_point_keypoints.detector.MIN_SCORE (or always, with VERIFY_EVERY_TOUCH_POINT) the
+    model's point opens in verify_or_correct_touch_point as the proposal; `grab_frame`, a callable
+    returning a fresh BGR frame, enables its 't' retake.
+
+    Returns (touch_pixel, overlay, image_bgr, detected_pixel, human_checked). Only human-checked
+    results belong in the lid_touch_point_debug dataset -- saving the model's own guesses as labels
+    would train it on itself.
+    """
+    from touch_point_keypoints.detector import MIN_SCORE
+
+    detected, score = learned_touch_point(image_bgr)
+    if score >= MIN_SCORE and not VERIFY_EVERY_TOUCH_POINT:
+        print(f"[detect] learned touch point {detected} (score {score:.2f}) -- used without asking")
+        return detected, draw_overlay(image_bgr, None, detected), image_bgr, detected, False
+    reason = f"has score {score:.2f} (< {MIN_SCORE})" if score < MIN_SCORE else f"(score {score:.2f}), check asked for"
+    print(f"[detect] learned touch point {detected} {reason} -- verify or click it")
+
+    def regrab():
+        frame = grab_frame()
+        return frame, learned_touch_point(frame)[0]
+
+    touch_pixel, _, overlay, image_bgr, detected = verify_or_correct_touch_point(
+        image_bgr, detected, regrab=regrab if grab_frame is not None else None)
+    return touch_pixel, overlay, image_bgr, detected, True
 
 
 def save_touch_point_sample(image_bgr, overlay, hover_height, click_xy, detected_xy):
@@ -228,56 +248,21 @@ if __name__ == "__main__":
     image_rgb = camera.get_rgb_image_as_int()
     image_bgr = ImageConverter.from_numpy_int_format(image_rgb).image_in_opencv_format
 
-    detected_pixel = detect_touch_point(image_bgr, hover_height)
+    def grab_frame():
+        return ImageConverter.from_numpy_int_format(camera.get_rgb_image_as_int()).image_in_opencv_format
 
-    # verify/correct interactively, and grow the labeled dataset with this frame:
-    # click_xy is the human-verified ground truth (the accepted detection, or the correction)
-    # no regrab callback here: this script grabs a single frame up front, so 't' is inert
-    touch_pixel, corrected_pixel, verify_overlay, image_bgr, detected_pixel = verify_or_correct_touch_point(
-        image_bgr, detected_pixel
-    )
-    save_touch_point_sample(image_bgr, verify_overlay, hover_height, touch_pixel, detected_pixel)
+    touch_pixel, verify_overlay, image_bgr, detected_pixel, human_checked = resolve_touch_point(image_bgr, grab_frame)
+    if human_checked:  # grow the labeled dataset with frames a person looked at
+        save_touch_point_sample(image_bgr, verify_overlay, hover_height, touch_pixel, detected_pixel)
+    corrected_pixel = touch_pixel if tuple(touch_pixel) != tuple(detected_pixel) else None
     if corrected_pixel is not None:
         print(f"[verify] using corrected touch point {touch_pixel} (detection was {detected_pixel})")
 
     touch_point = pixel_to_point_on_cap_plane(touch_pixel, intrinsics, camera_pose_in_base, cap_pose)
 
-    # radially-outward direction in the cap plane: from the cap center through the touch point
-    outward = touch_point - cap_center
-    outward /= np.linalg.norm(outward)
-
-    # tangent at the touch point, counter-clockwise about the cap's outward normal --
-    # "left" of the touch point as seen along the old circular motion's direction
-    tangent = np.cross(cap_normal, outward)
-    tangent /= np.linalg.norm(tangent)
-
-    # the gripper targets the touch point shifted radially outward (past the cap edge)
-    # AND tangentially to the left
-    grip_point = touch_point + RADIAL_OUTWARD_OFFSET * outward + TANGENTIAL_OFFSET * tangent
-
-    # opening motion: straight-line push from the grip point toward the push end point --
-    # the cap center shifted along the same tangential axis -- at the gripper's height
-    push_end = cap_center + PUSH_TARGET_TANGENTIAL_OFFSET * tangent
-    push_direction = push_end - grip_point
-    push_direction /= np.linalg.norm(push_direction)
-    approach_position = grip_point + APPROACH_OFFSET * cap_normal
-    push_target = push_end + APPROACH_OFFSET * cap_normal + PUSH_OVERSHOOT * push_direction
-
-    # legs after the push: each direction is the previous leg's direction rotated by the
-    # leg's angle counter-clockwise about the cap normal, and each leg ends LEG_DEPTH_STEP_M
-    # deeper than the previous one. leg_ends are the cap-plane points (for the image preview),
-    # leg_targets the actually-descending points the robot moves to.
-    leg_ends, leg_targets = [], []
-    leg_direction = push_direction
-    leg_end, leg_target = push_end, push_target
-    for angle_deg, offset in LEGS:
-        leg_direction = rotation_about_axis(cap_normal, np.radians(angle_deg)) @ leg_direction
-        leg_direction -= cap_normal * cap_normal.dot(leg_direction)  # keep exactly in-plane
-        leg_direction /= np.linalg.norm(leg_direction)
-        leg_end = leg_end + offset * leg_direction
-        leg_target = leg_target + offset * leg_direction - LEG_DEPTH_STEP_M * cap_normal
-        leg_ends.append(leg_end)
-        leg_targets.append(leg_target)
+    plan = plan_opening_motion(cap_pose, touch_point)
+    grip_point, push_end, push_target = plan["grip_point"], plan["push_end"], plan["push_target"]
+    approach_position, leg_ends, leg_targets = plan["approach_position"], plan["leg_ends"], plan["leg_targets"]
 
     # --- rerun: image with detected touch point, grip point, push target + 3D view ---
     grip_pixel = project_point_to_pixel(grip_point, intrinsics, camera_pose_in_base)
@@ -301,12 +286,12 @@ if __name__ == "__main__":
 
     print(f"[detect] touch pixel={touch_pixel}  touch point (base frame)={np.round(touch_point, 4)}")
     print(f"[detect] grip point ({RADIAL_OUTWARD_OFFSET * 100:.1f}cm outward + {TANGENTIAL_OFFSET * 100:.1f}cm left of touch point, base frame)={np.round(grip_point, 4)}")
-    print(f"[detect] push end ({PUSH_TARGET_TANGENTIAL_OFFSET * 100:.1f}cm left of cap center)  push target (base frame)={np.round(push_target, 4)}")
+    print(f"[detect] push {PUSH_LENGTH_M * 100:.1f}cm at {PUSH_ANGLE_DEG:.1f} deg toward the cap centre  push target (base frame)={np.round(push_target, 4)}")
     input("Check the detection in rerun. Press Enter to move the gripper to the grip point (Ctrl+C to abort)...")
 
     # yaw the gripper about its own TCP z-axis (rotate in place at the hover position)
     # to GRIPPER_YAW_DEG relative to the touch-point -> bottle-center axis
-    yawed_rotation = compute_yawed_gripper_orientation(cap_normal, -outward, GRIPPER_YAW_DEG)
+    yawed_rotation = plan["yawed_rotation"]
     yaw_pose = np.eye(4)
     yaw_pose[:3, :3] = yawed_rotation
     yaw_pose[:3, 3] = start_pose[:3, 3]
@@ -328,12 +313,12 @@ if __name__ == "__main__":
     print(f"[push] straight line to {np.round(push_target, 4)}")
     ur_left.move_linear_to_tcp_pose(push_pose, linear_speed=MOVE_SPEED).wait()
 
-    # chained legs, each at its angle relative to the previous leg's direction
-    leg_pose = push_pose.copy()
-    for i, ((angle_deg, offset), leg_target) in enumerate(zip(LEGS, leg_targets)):
-        leg_pose = leg_pose.copy()
-        leg_pose[:3, 3] = leg_target
-        print(f"[push] leg {i + 2} ({angle_deg:.0f} deg from previous direction, {offset * 100:.0f}cm, {(i + 1) * LEG_DEPTH_STEP_M * 100:.1f}cm deeper than the push) to {np.round(leg_target, 4)}")
+    # chained legs, each at its angle relative to the previous leg's direction; the gripper turns with the
+    # path (opening_motion) -- during the leg, or in place first (YAW_SPEED) with TURN_DURING_LEGS off
+    for i, ((angle_deg, offset), turn_pose, leg_pose) in enumerate(zip(LEGS, plan["leg_turn_poses"], plan["waypoint_poses"][2:])):
+        print(f"[push] leg {i + 2} ({angle_deg:.0f} deg from previous direction, {offset * 100:.0f}cm, {(i + 1) * LEG_DEPTH_STEP_M * 100:.1f}cm deeper than the push) to {np.round(leg_pose[:3, 3], 4)}")
+        if not TURN_DURING_LEGS:
+            ur_left.move_linear_to_tcp_pose(turn_pose, linear_speed=YAW_SPEED).wait()
         ur_left.move_linear_to_tcp_pose(leg_pose, linear_speed=MOVE_SPEED).wait()
     # ur_left.move_to_joint_configuration([ 0.06967844 ,-1.40953115 ,-1.61241627, -1.67278638 , 1.54791272 , 3.03650355])
     ur_left.move_to_joint_configuration(LEFT_HOME_JOINTS, joint_speed=LEFT_TRANSIT_JOINT_SPEED).wait()

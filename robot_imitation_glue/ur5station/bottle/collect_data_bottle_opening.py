@@ -2,10 +2,10 @@ import sys
 from pathlib import Path
 
 import numpy as np
-from airo_robots.grippers.hardware.schunk_process import SchunkGripperProcess
 
 from robot_imitation_glue.collect_data_bottle import collect_data_bottle_opening
 from robot_imitation_glue.dataset_recorder import LeRobotDatasetRecorder
+from robot_imitation_glue.hardware.gripper_startup import GRIPPER_PORT_RIGHT, make_gripper
 from robot_imitation_glue.ur5station.bottle.splits import (
     POSE_BLACKLIST,
     SPLIT_N_POSES,
@@ -34,7 +34,7 @@ for _path in _LOCAL_PATHS:
 from open_bottle_agent import RANDOM_SEED, generate_reachable_bottle_poses  # noqa: E402
 
 if __name__ == "__main__":
-    schunk = SchunkGripperProcess(usb_interface="/dev/serial/by-path/pci-0000:00:14.0-usb-0:7:1.0-port0,11,115200,8E1")
+    schunk = make_gripper(GRIPPER_PORT_RIGHT)
 
     # with_spectogram records the mel spectrogram as an observation -- audio is one of the modalities
     # under evaluation and cannot be recovered after the fact, so it must be on from the first episode.
@@ -56,7 +56,7 @@ if __name__ == "__main__":
         example_obs_dict=env.get_observations(),
         # policy action = delta_xyz(3) + rotation_6d(6), same format collect_data_xyz records
         example_action=np.zeros((9,), dtype=np.float32),
-        root_dataset_dir=Path(f"datasets/bottle_experiment/expert/{dataset_name}"),
+        root_dataset_dir=Path(f"datasets/bottle_experiment/expert_try/{dataset_name}"),
         dataset_name=dataset_name,
         fps=10,
         use_videos=True,
