@@ -220,7 +220,7 @@ observation preprocessors: in `eval()`, `record_step(observations, action)` is c
 `policy_agent.get_action(observations)`, so a preprocessor that mutates the dict in place (`observation.pop(...)`,
 in-place `transpose`/scaling — as the illustrative preprocessor in `lerobot_agent.py`'s `__main__` does)
 will corrupt what is written to the eval dataset. Build and return a fresh dict, like the preprocessors in
-`ur5station/eval_act_lerobot.py` and `ur5station/eval_diffusion_lerobot.py` do.
+`ur5station/eval_lerobot.py` do.
 
 **Preprocessing must match between collection, training and inference.** The env already does part of the
 work (`UR5eStation.get_observations()` resizes to 320x240 and keeps the full-resolution images under
