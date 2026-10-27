@@ -11,10 +11,10 @@ from typing import Optional
 import numpy as np
 from airo_camera_toolkit.interfaces import RGBCamera
 from airo_camera_toolkit.utils.image_converter import ImageConverter
-from airo_ipc.cyclone_shm.idl_shared_memory.base_idl import BaseIDL
+from airo_ipc.cyclone_shm.idl_shared_memory.base_idl import BaseIdl
 from airo_ipc.cyclone_shm.patterns.ddsreader import DDSReader
 from airo_ipc.cyclone_shm.patterns.sm_reader import SMReader
-from airo_ipc.framework.framework import IpcKind, initialize_ipc
+from airo_ipc.framework.framework import IpcKind
 from airo_ipc.framework.node import Node
 from airo_typing import CameraIntrinsicsMatrixType, CameraResolutionType, NumpyFloatImageType, NumpyIntImageType
 from cyclonedds.domain import DomainParticipant
@@ -24,15 +24,16 @@ from loguru import logger
 
 @dataclass
 class ResolutionIdl(IdlStruct):
-    """We will send the resolution of the webcam over DDS: we need to define an IDL struct for this."""
+    """We will send the resolution (and fps) of the webcam over DDS: we need to define an IDL struct for this."""
 
     width: int
     height: int
+    fps: float
 
 
 @dataclass
-class RGBFrame(BaseIDL):
-    """We will send the RGB frames over shared memory: we need to derive from BaseIDL."""
+class RGBFrame(BaseIdl):
+    """We will send the RGB frames over shared memory: we need to derive from BaseIdl."""
 
     timestamp: np.ndarray
     rgb: np.ndarray
@@ -71,11 +72,12 @@ class RGBCameraPublisher(Node):
 
     def _step(self):
         """The _step method is called in a loop by the Node superclass."""
-        rgb = self._camera.get_rgb_image_as_int()
+        self._camera.grab_images()
+        rgb = self._camera.retrieve_rgb_image_as_int()
 
         self._publish(
             self._resolution_topic_name,
-            ResolutionIdl(width=self._camera.resolution[0], height=self._camera.resolution[1]),
+            ResolutionIdl(width=self._camera.resolution[0], height=self._camera.resolution[1], fps=self._camera.fps),
         )
         self._publish(
             self._rgb_topic_name,
@@ -98,6 +100,8 @@ class RGBCameraSubscriber(RGBCamera):
             resolution = self._reader_resolution()
             logger.info("Did not yet receive resolution message. Sleeping for 1s...")
             time.sleep(1)
+        self._resolution = (resolution.width, resolution.height)
+        self._fps = resolution.fps
         self._reader_rgb = SMReader(
             self._cyclone_dp, rgb_topic, RGBFrame.with_resolution(resolution.width, resolution.height)
         )
@@ -106,10 +110,15 @@ class RGBCameraSubscriber(RGBCamera):
     def resolution(self) -> CameraResolutionType:
         return self._resolution
 
-    def _retrieve_rgb_image(self) -> NumpyFloatImageType:
+    @property
+    def fps(self) -> float:
+        """fps of the published camera, the subscriber itself is read at the rate of its caller."""
+        return self._fps
+
+    def retrieve_rgb_image(self) -> NumpyFloatImageType:
         return ImageConverter.from_numpy_int_format(self._rgb).image_in_numpy_format
 
-    def _retrieve_rgb_image_as_int(self) -> NumpyIntImageType:
+    def retrieve_rgb_image_as_int(self) -> NumpyIntImageType:
         return self._rgb
 
     def intrinsics_matrix(self) -> CameraIntrinsicsMatrixType:
@@ -119,7 +128,7 @@ class RGBCameraSubscriber(RGBCamera):
         """Get the timestamp of the current image."""
         return self._timestamp
 
-    def _grab_images(self) -> None:
+    def grab_images(self) -> None:
         frame = self._reader_rgb()
         if frame is not None:
             self._rgb = frame.rgb  # Already copied in the SMReader.
@@ -139,8 +148,6 @@ class CameraFactory:
 if __name__ == "__main__":
     import cv2
 
-    initialize_ipc()
-
     TOPIC_RGB = "webcam_rgb"
     TOPIC_RESOLUTION = "webcam_resolution"
     logger.info("Creating publisher.")
@@ -155,7 +162,8 @@ if __name__ == "__main__":
     cv2.namedWindow("Webcam", cv2.WINDOW_NORMAL)
 
     while True:
-        rgb = subscriber.get_rgb_image_as_int()
+        subscriber.grab_images()
+        rgb = subscriber.retrieve_rgb_image_as_int()
         image_timestamp = subscriber.get_timestamp()
         current_time = time.time()
         logger.debug(

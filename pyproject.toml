@@ -31,7 +31,7 @@ airo = [
     "airo-dataset-tools", # not imported here, but required by airo-camera-toolkit: listed so uv uses the vendored copy
     "airo-spatial-algebra",
     "airo-camera-toolkit",
-    "airo-robots",
+    "airo-robots[ur]", # the UR driver (ur-rtde) is an extra of airo-robots
 ]
 # vendored lerobot fork: dataset recording/replay and the lerobot agents
 lerobot = [
@@ -58,11 +58,6 @@ remote-policy = ["json-numpy", "pillow", "requests"]
 
 [tool.setuptools.packages.find]
 include = ["robot_imitation_glue*"]
-
-[tool.uv]
-# airo-robots -> airo-tulip over-pins pyzmq==26.0.3, lerobot needs pyzmq>=26.2.1.
-# Both work on 26.2.x, so relax the pin instead of dropping one of the two extras.
-override-dependencies = ["pyzmq>=26.2.1"]
 
 [tool.uv.sources]
 airo-ipc = { path = "airo-ipc", editable = true }
