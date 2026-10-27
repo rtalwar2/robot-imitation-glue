@@ -51,6 +51,8 @@ robot_imitation_glue/
   collect_data.py      collect_data(): teleop loop + keyboard state machine + recording
   eval_agent.py        eval(): teleop to set the scene, then policy rollouts, recorded as a dataset
   dataset_recorder.py  LeRobotDatasetRecorder (feature spec inferred from an example obs dict)
+  preprocessing.py     action encodings, state/key/image conversions shared by collection, dataset prep, eval
+  action_spaces.py     EEF vs joint action space of an env/agent pair, joint-target safety check
   mock.py              MockEnv / MockAgent / mock_agent_to_pose_converter (no hardware)
   agents/              gello/, spacemouse_agent, airo_teleop_agent (adapter), lerobot_agent,
                        openvla_agent, openpi_agent
@@ -59,9 +61,9 @@ robot_imitation_glue/
   lerobot_dataset/     dataset tools: transform_dataset, remap_lerobot_keys, remove/add-description,
                        replay_episode, upload_dataset
   hardware/            ipc_camera (airo-ipc shared-memory cameras), grippers/schunk_process
-  ur5station/          UR5e + Schunk + Gello station: env, data_collection, prepare_datasets,
-                       replay, eval_{act,diffusion}_lerobot, eval_pi0, lerobot_train/*.json configs
-  uR3station/          UR3e + Robotiq + SpaceMouse station: env, collect_data, eval_openvla
+  ur5station/          UR5e + Schunk + Gello station: ur5_robot_env, data_collection, prepare_datasets,
+                       replay, eval_*.py, lerobot_train/*.json configs
+  ur3station/          UR3e + Robotiq + SpaceMouse station: ur3_robot_env, data_collection, eval_openvla
 ```
 
 Data flow: station `data_collection.py` -> `collect_data()` -> `LeRobotDatasetRecorder` writes
@@ -70,8 +72,8 @@ to `observation.*` and converts rot6d EEF actions to joint actions via IK) -> tr
 (configs in `ur5station/lerobot_train/`) or `python -m robot_imitation_glue.baseline.train[_dit]` ->
 station `eval_*.py` wraps the policy in an agent and calls `eval()`, which records rollouts as a new dataset.
 
-Both loops integrate targets: the converter receives the previous *target* pose/gripper, not the measured
-pose. Converters have the signatures `teleop_to_pose_converter(target_pose, target_gripper, action) ->
+For EEF actions both loops integrate targets: the converter receives the previous *target* pose/gripper, not
+the measured pose. Converters have the signatures `teleop_to_pose_converter(target_pose, target_gripper, action) ->
 (4x4 pose, gripper)` and `abs_pose_to_policy_action(cur_pose, cur_gripper, new_pose, new_gripper) -> action`.
 
 ## Conventions that are easy to get wrong
@@ -84,13 +86,16 @@ pose. Converters have the signatures `teleop_to_pose_converter(target_pose, targ
   (`convert_abs_gello_actions_to_se3`, maps to width as `(1 - g) * 0.08`); airo-teleop poses = 9-dim
   absolute `[xyz, x-axis, y-axis]` (+ optional gripper width) via `SE3_ACTION_DIM` in
   `agents/airo_teleop_agent.py`; UR3 = 7-dim relative `[dxyz, d-euler xyz, d-gripper]` expressed in the
-  current EEF frame (`abs_se3_to_relative_policy_action_converter` in `uR3station/collect_data.py`), while its
+  current EEF frame (`abs_se3_to_relative_policy_action_converter`, used in `ur3station/data_collection.py`), while its
   SpaceMouse teleop deltas are base-aligned (`delta_action_to_abs_se3_converter`). A wrong
   converter does not raise, it moves the robot elsewhere; confirm with a replay.
-- **`ActionType` / `act_joints`.** `base.py` defines `ActionType` (`ABS_EEF`, `REL_EEF`, `ABS_JOINT`,
-  `REL_JOINT`) and `BaseEnv.act_joints()`, implemented by `UR5eStation` and `MockEnv`. `collect_data()` and
-  `eval()` currently always call `env.act()` with an SE3 pose, so joint-space policies are executed through
-  forward kinematics in the converter. Keep `act()` and `act_joints()` non-blocking; the caller owns timing.
+- **`ActionType` / `act_joints`.** `collect_data()` and `eval()` pick the action space with
+  `action_spaces.resolve_action_type(env, agent)`: EEF actions go through the pose converters to `env.act()`,
+  joint actions through the joint converters (which get the *measured* joint configuration) to
+  `env.act_joints()`, after a slow approach move and with `max_joint_delta` rejection of large jumps. An env
+  without an `ACTION_SPEC` (both real stations today) means absolute EEF poses, so the UR5 joint-space
+  policies are still executed through forward kinematics in their converter. Keep `act()` and `act_joints()`
+  non-blocking; the caller owns timing.
 - **Observation keys.** Envs return flat dicts of numpy arrays; images are HWC uint8 RGB. `collect_data()`
   hardcodes `scene_image` and `wrist_image`; `eval()` takes `env_observation_image_key`. UR5 also returns
   `*_image_original` (full-res, usually dropped later), `state` (euler pose + gripper), `robot_pose`,
@@ -98,7 +103,8 @@ pose. Converters have the signatures `teleop_to_pose_converter(target_pose, targ
   `observation.images.<name>` / `observation.state`, produced by `remap_lerobot_keys.py` or a
   `transform_dataset` step.
 - **Preprocessing must match across collection, training and inference** (resize, crop, `/255`, CHW, batch
-  dim). The baseline shares `to_chw_float_image` / `resize_image` between `train.py` and `agent.py`; reuse
+  dim). `preprocessing.py` is the single source of truth for the action encodings and key/image conversions;
+  import from it instead of re-implementing a converter in a script. The baseline shares `to_chw_float_image` / `resize_image` between `train.py` and `agent.py`; reuse
   them. For lerobot agents the preprocessor in each `eval_*.py` is the contract; return a fresh dict, never
   mutate the observation in place (it is recorded after `get_action`). Never draw on an observation without
   `.copy()`.
@@ -109,20 +115,20 @@ pose. Converters have the signatures `teleop_to_pose_converter(target_pose, targ
   newer upstream lerobot layout (`lerobot.datasets`) without bumping the submodule and the lock together.
   `make_lerobot_policy` needs the training dataset locally for normalisation stats.
 - **Recording into an existing dir appends** to that dataset. Use a fresh directory for a fresh dataset.
-- **Station scripts are configured by editing paths in `__main__`** (checkpoints, dataset roots, ports),
-  not by CLI flags. Do not commit machine-specific paths you add.
+- **Station scripts take CLI arguments whose defaults are constants at the top of the script**
+  (checkpoints, dataset roots, ports), so they can be run as-is after editing those constants. Keep that
+  pattern for new scripts, and do not commit machine-specific absolute paths as defaults.
 - Do not commit `datasets/`, `outputs/`, checkpoints or large media (see `.gitignore`).
 
 ## Safety rules for agents
 
-- Never run anything under `ur5station/`, `uR3station/`, `agents/gello/`, `agents/spacemouse_agent.py`,
+- Never run anything under `ur5station/`, `ur3station/`, `agents/gello/`, `agents/spacemouse_agent.py`,
   `hardware/`, `lerobot_dataset/replay_episode.py`, or the `__main__` of `collect_data.py` / `eval_agent.py`.
   These move a robot, open cameras or grippers, or grab the keyboard. Only a human operator at the station
-  runs them; prepare the command and hand it over. `uR3station/collect_data.py` connects to the robot at
-  module level, so do not even import it (`ur5station/prepare_datasets.py` likewise rewrites a dataset on
-  import).
+  runs them; prepare the command and hand it over. Importing these modules is fine (no side effects at import).
 - Do not loosen the safety checks in `UR5eStation.act()` (z < 0, unreachable pose, gripper pointing up,
-  `MAX_TRANSLATION` clipping) or add motion without a confirmation step.
+  `MAX_TRANSLATION` clipping) or the joint-target check (`action_spaces.joint_target_is_safe`), or add
+  motion without a confirmation step.
 - Keep tests and verification on CPU with mocks; do not launch GPU training or inference unasked.
 - No `git push`, PRs, dataset uploads (`upload_dataset.py`, `push_to_hub`) or other remote writes unless the
   user explicitly asks. Do not modify submodule contents; change the pin deliberately or not at all.
@@ -130,8 +136,7 @@ pose. Converters have the signatures `teleop_to_pose_converter(target_pose, targ
 ## Further reading
 
 - `docs/debugging.md`: replaying episodes, offline inference on recorded data, mock env, dataset tools,
-  common pitfalls. Parts of sections 3 and 6 predate the latest merges: `MockEnv` is now instantiable,
-  `environment.yaml` is gone (use uv, above), and the UR5 hardware imports are fixed.
+  common pitfalls.
 - `robot_imitation_glue/agents/airo_teleop_agent.py` module docstring: airo-teleop action formats.
 - `robot_imitation_glue/baseline/train.py`, `train_dit.py` docstrings: training CLI examples.
 - `robot_imitation_glue/agents/gello/readme.md`: Gello calibration.
