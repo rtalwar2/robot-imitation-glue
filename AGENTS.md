@@ -24,7 +24,8 @@ Extras (`pyproject.toml`): `airo` (airo-ipc + airo-mono packages), `lerobot` (ve
 SpaceMouse, `ur-analytic-ik`), `remote-policy` (OpenVLA HTTP client). All submodule packages are editable
 path sources under `[tool.uv.sources]`. `openpi-client` is deliberately not installable here (it pins
 numpy<2); pi0 eval needs a separate env. airo-robots' hardware drivers are extras of airo-robots itself
-(`airo-robots[ur]` here; add e.g. `[realman]` for a RealMan station).
+(`airo-robots[ur]` here; add e.g. `[realman]` for a RealMan station). `numpy<2.4` and `datasets<4` are pinned
+for the lerobot fork (newer versions break saving/loading episodes); do not lift them without bumping lerobot.
 
 ## Tests and CI
 
@@ -32,9 +33,11 @@ numpy<2); pi0 eval needs a separate env. airo-robots' hardware drivers are extra
 uv sync --frozen && uv run --frozen pytest test/   # exactly what .github/workflows/test.yaml runs
 ```
 
-- With a bare `uv sync`, `test_baseline_policy.py`, `test_dit_policy.py` (need torch) and
-  `test_dataset_recorder_smoke.py` (needs the pinned lerobot) are skipped via `pytest.importorskip`. To run
-  them: `uv sync --extra baseline --extra lerobot` (requires the submodules).
+- With a bare `uv sync`, the tests that need torch, the pinned lerobot, the airo packages or `ur-analytic-ik`
+  (e.g. `test_baseline_policy.py`, `test_dataset_recorder_smoke.py`, `test_transform_dataset_smoke.py`,
+  `test_station_env.py`, `test_prepare_datasets.py`) are skipped via `pytest.importorskip`, so CI does not run
+  them. To run everything: `uv sync --extra airo --extra teleop --extra hardware --extra lerobot --extra baseline`
+  (requires the submodules).
 - Tests must stay CPU-only and hardware-free. Use `robot_imitation_glue/mock.py` (`MockEnv`, which
   implements every `BaseEnv` method incl. `act_joints`) or duck-typed fakes (see
   `test/test_airo_teleop_agent.py`). New optional-dependency tests must `importorskip`, not fail.
@@ -53,16 +56,18 @@ robot_imitation_glue/
   dataset_recorder.py  LeRobotDatasetRecorder (feature spec inferred from an example obs dict)
   preprocessing.py     action encodings, state/key/image conversions shared by collection, dataset prep, eval
   action_spaces.py     EEF vs joint action space of an env/agent pair, joint-target safety check
+  station_env.py       ManipulatorStation: the shared env of the robot stations (airo-robots arm + gripper,
+                       wrist/scene camera over ipc); stations override preprocess_images/is_safe_pose/servo_gripper
   mock.py              MockEnv / MockAgent / mock_agent_to_pose_converter (no hardware)
-  agents/              airo_teleop_agent (adapter for the airo-teleop Gello/SpaceMouse/phone), lerobot_agent,
-                       openvla_agent, openpi_agent
+  agents/              airo_teleop_agent (adapter + make_gello/spacemouse/phone_agent(env, ...) for any station),
+                       lerobot_agent, openvla_agent, openpi_agent
   baseline/            plain-pytorch policies: BC (policy/train/agent) and DiT flow matching
                        (dit_policy/train_dit/dit_agent); read datasets through lerobot only
   lerobot_dataset/     dataset tools: transform_dataset, remap_lerobot_keys, remove/add-description,
                        replay_episode, upload_dataset
   hardware/            ipc_camera (airo-ipc shared-memory cameras), grippers/schunk_process
   ur5station/          UR5e + Schunk + Gello station: ur5_robot_env, data_collection, prepare_datasets,
-                       replay, eval_*.py, lerobot_train/*.json configs
+                       replay, eval_lerobot, eval_pi0, lerobot_train/*.json configs
   ur3station/          UR3e + Robotiq + SpaceMouse station: ur3_robot_env, data_collection, eval_openvla
 ```
 
@@ -73,22 +78,27 @@ to `observation.*` and converts rot6d EEF actions to joint actions via IK) -> tr
 station `eval_*.py` wraps the policy in an agent and calls `eval()`, which records rollouts as a new dataset.
 
 For EEF actions both loops integrate targets: the converter receives the previous *target* pose/gripper, not
-the measured pose. Converters have the signatures `teleop_to_pose_converter(target_pose, target_gripper, action) ->
-(4x4 pose, gripper)` and `abs_pose_to_policy_action(cur_pose, cur_gripper, new_pose, new_gripper) -> action`.
+the measured pose. `env.act()` returns `False` when the env refuses a pose (UR5 safety checks); both loops then
+continue from the measured pose, and `collect_data` does not record that step. Converters have the signatures
+`teleop_to_pose_converter(target_pose, target_gripper, action) -> (4x4 pose, gripper)` and
+`abs_pose_to_policy_action(cur_pose, cur_gripper, new_pose, new_gripper) -> action`.
 
 ## Conventions that are easy to get wrong
 
 - **Action formats are only defined by their converter pair.** Nothing validates them:
-  `collect_data` asserts `env.ACTION_SPEC == teleop_agent.ACTION_SPEC`, but both are `None` on the real
-  stations. Formats in use: UR5 raw collection = 10-dim absolute `[xyz, rot x-axis, rot y-axis, gripper]`
-  in the robot base frame (`ur5station/data_collection.py`); UR5 prepared = 7-dim absolute
-  `[6 joints, gripper]` (`abs_joint_policy_action_to_se3`); Gello = the same 7-dim joints + gripper width
+  `action_spaces.resolve_action_type` compares the `ACTION_SPEC`s, but they are `None` on the real stations.
+  Formats in use: UR5 raw collection = 10-dim absolute `[xyz, rot x-axis, rot y-axis, gripper]` in the robot base
+  frame (`ur5station/data_collection.py`); UR5 prepared = 7-dim absolute `[6 joints, gripper]`
+  (`abs_joint_policy_action_to_se3`); Gello = the same 7-dim joints + gripper width
   (`convert_abs_gello_actions_to_se3`, the UR5's airo-teleop `Gello4UR_ParallelGripper`); airo-teleop poses = 9-dim
   absolute `[xyz, x-axis, y-axis]` (+ optional gripper width) via `SE3_ACTION_DIM` in
-  `agents/airo_teleop_agent.py`; UR3 = 7-dim relative `[dxyz, d-euler xyz, d-gripper]` expressed in the
-  current EEF frame (`abs_se3_to_relative_policy_action_converter`, used in `ur3station/data_collection.py`), while its
-  SpaceMouse teleop deltas (airo-teleop, `action_mode="delta"`) are base-aligned (`delta_action_to_abs_se3_converter`). A wrong
-  converter does not raise, it moves the robot elsewhere; confirm with a replay.
+  `agents/airo_teleop_agent.py`; UR3 = 7-dim relative `[dxyz, d-euler xyz, d-gripper]` expressed in the current EEF
+  frame (`abs_se3_to_relative_policy_action_converter`, used in `ur3station/data_collection.py`), while its
+  SpaceMouse teleop deltas (airo-teleop, `action_mode="delta"`) are base-aligned
+  (`delta_action_to_abs_se3_converter`). The UR3 gripper is recorded as a delta but
+  `relative_policy_action_to_abs_se3_converter` (OpenVLA) decodes 0/1, so binarize first
+  (`ur3station/zero_action_remover.ipynb`). A wrong converter does not raise, it moves the robot elsewhere; confirm
+  with a replay.
 - **`ActionType` / `act_joints`.** `collect_data()` and `eval()` pick the action space with
   `action_spaces.resolve_action_type(env, agent)`: EEF actions go through the pose converters to `env.act()`,
   joint actions through the joint converters (which get the *measured* joint configuration) to
@@ -97,17 +107,17 @@ the measured pose. Converters have the signatures `teleop_to_pose_converter(targ
   policies are still executed through forward kinematics in their converter. Keep `act()` and `act_joints()`
   non-blocking; the caller owns timing.
 - **Observation keys.** Envs return flat dicts of numpy arrays; images are HWC uint8 RGB. `collect_data()`
-  hardcodes `scene_image` and `wrist_image`; `eval()` takes `env_observation_image_key`. UR5 also returns
-  `*_image_original` (full-res, usually dropped later), `state` (euler pose + gripper), `robot_pose`,
-  `gripper_state`, `joints`. The recorder keeps keys as-is and declares image features channel-first; policies expect
-  `observation.images.<name>` / `observation.state`, produced by `remap_lerobot_keys.py` or a
-  `transform_dataset` step.
-- **Preprocessing must match across collection, training and inference** (resize, crop, `/255`, CHW, batch
-  dim). `preprocessing.py` is the single source of truth for the action encodings and key/image conversions;
-  import from it instead of re-implementing a converter in a script. The baseline shares `to_chw_float_image` / `resize_image` between `train.py` and `agent.py`; reuse
-  them. For lerobot agents the preprocessor in each `eval_*.py` is the contract; return a fresh dict, never
-  mutate the observation in place (it is recorded after `get_action`). Never draw on an observation without
-  `.copy()`.
+  hardcodes `scene_image` and `wrist_image`; `eval()` takes `env_observation_image_key`. The stations
+  (`ManipulatorStation`) also return `*_image_original` (full-res, usually dropped later), `state` (euler pose +
+  gripper), `robot_pose`, `gripper_state`, `joints`. The recorder keeps keys as-is and declares image features
+  channel-first; policies expect `observation.images.<name>` / `observation.state`, produced by
+  `remap_lerobot_keys.py` or a `transform_dataset` step.
+- **Preprocessing must match across collection, training and inference** (resize, crop, `/255`, CHW, batch dim).
+  `preprocessing.py` is the single source of truth for the action encodings and key/image conversions; import from
+  it instead of re-implementing a converter in a script. The baseline shares `to_chw_float_image` / `resize_image`
+  between `train.py` and `agent.py`; reuse them. For lerobot agents the preprocessor in each `eval_*.py` is the
+  contract; return a fresh dict, never mutate the observation in place (it is recorded after `get_action`). Never
+  draw on an observation without `.copy()`.
 - **Reset agents between episodes.** `eval()` calls `policy_agent.reset()` before each rollout. Chunking
   agents (`LerobotAgent`, `DiTAgent`, `OpenPIAgent`) keep action queues; any custom loop must reset too.
 - **Pinned lerobot API.** Imports are `lerobot.common.datasets.lerobot_dataset` (the pinned fork), and the
@@ -126,9 +136,9 @@ the measured pose. Converters have the signatures `teleop_to_pose_converter(targ
   `__main__` of `collect_data.py` / `eval_agent.py`.
   These move a robot, open cameras or grippers, or grab the keyboard. Only a human operator at the station
   runs them; prepare the command and hand it over. Importing these modules is fine (no side effects at import).
-- Do not loosen the safety checks in `UR5eStation.act()` (z < 0, unreachable pose, gripper pointing up,
-  `MAX_TRANSLATION` clipping) or the joint-target check (`action_spaces.joint_target_is_safe`), or add
-  motion without a confirmation step.
+- Do not loosen the safety checks in `UR5eStation.is_safe_pose()` (z < 0, unreachable pose, gripper pointing
+  up, `MAX_TRANSLATION` clipping) or the joint-target check (`action_spaces.joint_target_is_safe`), or add
+  motion without a confirmation step (like the one before `UR5eStation` moves to `HOME_JOINTS`).
 - Keep tests and verification on CPU with mocks; do not launch GPU training or inference unasked.
 - No `git push`, PRs, dataset uploads (`upload_dataset.py`, `push_to_hub`) or other remote writes unless the
   user explicitly asks. Do not modify submodule contents; change the pin deliberately or not at all.

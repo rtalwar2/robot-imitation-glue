@@ -37,11 +37,11 @@ second confirmation, and then feeds every recorded action through `action_to_env
 level each step, so you can diff the commanded trajectory against the executed one.
 
 A ready-made entry point for the UR5 station is
-[`robot_imitation_glue/ur5station/replay.py`](../robot_imitation_glue/ur5station/replay.py). It is a script,
-not a CLI: edit the dataset `root` and the episode index in the file, then
+[`robot_imitation_glue/ur5station/replay.py`](../robot_imitation_glue/ur5station/replay.py). The dataset and
+episode are arguments, with defaults at the top of the file:
 
 ```bash
-python robot_imitation_glue/ur5station/replay.py
+python -m robot_imitation_glue.ur5station.replay --dataset datasets/<name> --episode 0
 ```
 
 Notes:
@@ -51,10 +51,9 @@ Notes:
   [`ur5station/prepare_datasets.py`](../robot_imitation_glue/ur5station/prepare_datasets.py)), not on the raw
   10-dim rot6d dataset written by `ur5station/data_collection.py`. Using the wrong converter does not
   error, it just moves the robot somewhere else.
-- The `image_key` / `dataset_image_key` arguments only feed the (currently commented out) overlay of the
-  dataset's initial image on the live camera image, so `image_key` is effectively unused today. To
-  reproduce the recorded scene, set the scene up by hand while comparing against the dataset image — the
-  `eval` loop does have a working version of this blending (see below).
+- `image_key` is unused: `replay_episode` loads the dataset's initial image (`dataset_image_key`) but does not
+  show it. To reproduce the recorded scene, set the scene up by hand while comparing against the dataset
+  image — the `eval` loop does show this blending (see below).
 - Replay is open loop w.r.t. the scene: if the object is not where it was during recording, a successful
   replay only tells you the *robot* trajectory is faithfully stored.
 
@@ -66,7 +65,7 @@ offline. Two `__main__` blocks in the repo do exactly this.
 **LeRobot policies** — [`robot_imitation_glue/agents/lerobot_agent.py`](../robot_imitation_glue/agents/lerobot_agent.py):
 
 ```bash
-python -m robot_imitation_glue.agents.lerobot_agent   # edit `path` and `dataset_path` at the top of __main__
+python -m robot_imitation_glue.agents.lerobot_agent --checkpoint <.../pretrained_model> --dataset <training dataset>
 ```
 
 It loads the checkpoint with `make_lerobot_policy(pretrained_path, dataset_path)`, takes a frame straight
@@ -165,14 +164,12 @@ exercise the control loop, the keyboard state machine, the Rerun logging and the
 any hardware. Its "joint configuration" is simply the 2D grid position, and it declares an `ABS_EEF`
 `ACTION_SPEC` (as does `MockAgent`). `test/test_mock_env.py` shows how to drive it from a test.
 
-The `__main__` block of [`eval_agent.py`](../robot_imitation_glue/eval_agent.py) is the reference example:
-it wires `MockEnv` + two `MockAgent`s + a `LeRobotDatasetRecorder` into `eval()`.
-
-One thing to be aware of before you rely on it (a current limitation of `mock.py`, not of your setup):
-`MockEnv.get_observations()` returns the keys `agent_pos` and `scene`, whereas `collect_data()` hardcodes
-`observation["scene_image"]` and `observation["wrist_image"]` for its visualisation. The mock therefore
-works with `eval()` (whose image key is configurable via `env_observation_image_key`) but not
-out-of-the-box with `collect_data()`; override `get_observations()` in a subclass to add those keys.
+The `__main__` blocks of [`collect_data.py`](../robot_imitation_glue/collect_data.py) and
+[`eval_agent.py`](../robot_imitation_glue/eval_agent.py) are the reference examples: they wire `MockEnv`,
+`MockAgent`s and a `LeRobotDatasetRecorder` into `collect_data()` / `eval()`. `MockEnv.get_observations()`
+returns the same image keys as the stations (`scene_image`, `wrist_image`), plus `state`, `joints` and
+`gripper_state`. `test/test_joint_space_collection.py` drives `collect_data()` headless with scripted
+keyboard events.
 
 For a hardware-free check of the **recorder** specifically, run
 
@@ -222,23 +219,26 @@ in-place `transpose`/scaling — as the illustrative preprocessor in `lerobot_ag
 will corrupt what is written to the eval dataset. Build and return a fresh dict, like the preprocessors in
 `ur5station/eval_lerobot.py` do.
 
-**Preprocessing must match between collection, training and inference.** The env already does part of the
-work (`UR5eStation.get_observations()` resizes to 320x240 and keeps the full-resolution images under
-`*_image_original`), the dataset stores images channel-first, and the policy expects channel-first floats
-in `[0, 1]`. The eval preprocessors therefore do `/255.0` + `permute(2, 0, 1)` + `unsqueeze(0)`. Get any of
-these wrong and you get a policy that runs happily and outputs garbage. Watch out in particular for
-cropping/resizing applied twice: commit `ce10010` ("centercrop is already handled in DP policy") removed a
-center crop that the LeRobot diffusion policy was already applying internally, and `OpenPIAgent` resizes
-every HWC uint8 image with `resize_with_pad` to 224x224 *on top of* whatever your preprocessor did.
+**Preprocessing must match between collection, training and inference.** The env already does part of the work
+(`UR5eStation.preprocess_images()` resizes to 320x240, the UR3 crops and resizes to 224x224, and both keep the
+full-resolution images under `*_image_original`), the dataset stores images channel-first, and the policy
+expects channel-first floats in `[0, 1]`. The eval preprocessors therefore do `/255.0` + `permute(2, 0, 1)` +
+`unsqueeze(0)`. Get any of these wrong and you get a policy that runs happily and outputs garbage. Watch out
+in particular for cropping/resizing applied twice: commit `ce10010` ("centercrop is already handled in DP
+policy") removed a center crop that the LeRobot diffusion policy was already applying internally, and
+`OpenPIAgent` resizes every HWC uint8 image with `resize_with_pad` to 224x224 *on top of* whatever your
+preprocessor did.
 
 **Action format mismatches are silent.** The action stored in the dataset is whatever
 `abs_pose_to_policy_action` produced during collection, and it is only meaningful together with the inverse
 converter. On the UR5 station there are at least three formats in circulation: 10-dim
 position+rot6d+gripper (`abs_se3_to_policy_action_converter` /`policy_action_to_abs_se3_converter` in
 `ur5station/data_collection.py`), 7-dim absolute joints+gripper (`abs_joint_policy_action_to_se3`, produced
-by `prepare_datasets.py`), and the Gello teleop format (`convert_abs_gello_actions_to_se3`, the same joints + gripper width). `collect_data`
-asserts `env.ACTION_SPEC == teleop_agent.ACTION_SPEC`, but both are `None` on the current stations, so that
-assert protects nothing — check the converters by hand, and confirm with a replay (section 1).
+by `prepare_datasets.py`), and the Gello teleop format (`convert_abs_gello_actions_to_se3`, the same joints +
+gripper width). `action_spaces.resolve_action_type` compares the `ACTION_SPEC`s of env and agents, but they are
+`None` on the current stations, so it checks nothing there — check the converters by hand, and confirm with a
+replay (section 1). The UR3 datasets record the gripper as a delta (±0.01 m); the OpenVLA decoder
+(`relative_policy_action_to_abs_se3_converter`) expects 0/1, so binarize first (`zero_action_remover.ipynb`).
 
 **Chunking policies must be reset between rollouts.** `OpenPIAgent` keeps an `action_queue`, LeRobot
 policies keep an internal queue. `eval()` calls `policy_agent.reset()` at the start of every rollout; if you
@@ -264,9 +264,9 @@ the scenario list where it left off. If you want a fresh dataset, use a fresh di
 episodes cannot be deleted during collection: finish the session and use `remove_lerobot_dataset_episode.py`.
 
 **Watch the loop timing.** `collect_data()` prints `cycle time exceeded control period` when a step takes
-longer than `1/frequency`; `get_observations()` and `LerobotAgent.get_action()` log their duration. If you
-overrun the control period, the recorded dataset's fps no longer matches reality and the policy will be
-trained on a different effective control rate than it is evaluated at.
+longer than `1/frequency`; `get_observations()` and `LerobotAgent.get_action()` log their duration (at debug
+level). If you overrun the control period, the recorded dataset's fps no longer matches reality and the policy
+will be trained on a different effective control rate than it is evaluated at.
 
 **Set the scene up the same way you recorded it.** `eval()` accepts an `eval_dataset` and blends the initial
 scene image of the corresponding episode over the live camera image in Rerun
@@ -302,7 +302,13 @@ format and API differ noticeably between versions. The code here targets the pin
 (`lerobot.common.datasets...`, `dataset.add_frame(frame, task=...)`); a newer upstream lerobot
 (`lerobot.datasets...`) fails on import or on `add_frame`.
 
+The pinned lerobot also needs `numpy<2.4` and `datasets<4` (both pinned in `pyproject.toml`): with newer
+versions saving an episode fails (`TypeError: only 0-dimensional arrays can be converted to Python scalars`)
+and loading a dataset fails (`stack(): ... must be tuple of Tensors, not Column`). An environment that does
+not come from `uv.lock` (e.g. a conda env) can still have the newer ones.
+
 **Import errors for modules that clearly exist.** `ipc_camera.py` and `grippers/schunk_process.py` live
 under `robot_imitation_glue/hardware/` (moved in `5cb582e`; both stations import that location now). If an
 import error mentions a module that clearly exists, check whether it moved, and whether the extra that
-provides it (`hardware`, `airo`, ...) is installed.
+provides it (`hardware`, `airo`, ...) is installed. airo-robots' drivers are extras of airo-robots itself:
+`URrtde` raises an `ImportError` without `airo-robots[ur]` (which the `airo` extra installs).
