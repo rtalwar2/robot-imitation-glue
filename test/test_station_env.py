@@ -4,8 +4,12 @@ import time
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
-from robot_imitation_glue.station_env import ManipulatorStation
+# station_env needs the `airo` extra (airo-spatial-algebra)
+pytest.importorskip("airo_spatial_algebra")
+
+from robot_imitation_glue.station_env import ManipulatorStation  # noqa: E402
 
 
 class FakeGripper:
