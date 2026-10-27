@@ -49,7 +49,10 @@ class FakeRobot:
 
 
 class FakeCamera:
-    def get_rgb_image_as_int(self):
+    def grab_images(self):
+        pass
+
+    def retrieve_rgb_image_as_int(self):
         return np.zeros((480, 640, 3), dtype=np.uint8)
 
 

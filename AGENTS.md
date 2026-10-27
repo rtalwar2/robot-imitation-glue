@@ -23,8 +23,8 @@ Extras (`pyproject.toml`): `airo` (airo-ipc + airo-mono packages), `lerobot` (ve
 `teleop` (airo-teleop), `baseline` (torch/torchvision), `hardware` (RealSense, Schunk, Dynamixel,
 SpaceMouse, `ur-analytic-ik`), `remote-policy` (OpenVLA HTTP client). All submodule packages are editable
 path sources under `[tool.uv.sources]`. `openpi-client` is deliberately not installable here (it pins
-numpy<2); pi0 eval needs a separate env. `pyzmq` is overridden to `>=26.2.1` to reconcile airo-robots and
-lerobot; do not remove that override.
+numpy<2); pi0 eval needs a separate env. airo-robots' hardware drivers are extras of airo-robots itself
+(`airo-robots[ur]` here; add e.g. `[realman]` for a RealMan station).
 
 ## Tests and CI
 
