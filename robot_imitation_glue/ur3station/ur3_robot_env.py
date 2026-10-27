@@ -12,7 +12,6 @@ from airo_robots.grippers.hardware.robotiq_2f85_urcap import Robotiq2F85
 from airo_robots.manipulators.hardware.ur_rtde import URrtde
 from airo_spatial_algebra.se3 import SE3Container
 
-from robot_imitation_glue.agents.airo_teleop_agent import AiroTeleopAgent
 from robot_imitation_glue.station_env import ManipulatorStation
 
 WRIST_REALSENSE_SERIAL = "925322060348"
@@ -48,16 +47,6 @@ class UR3eStation(ManipulatorStation):
     def servo_gripper(self, width):
         # `move` sleeps 10 ms per call and returns an awaitable, too slow for every control step
         self.gripper._set_target_width(width)
-
-
-def make_spacemouse_agent() -> AiroTeleopAgent:
-    """the SpaceMouse of the station, returns delta actions [dx,dy,dz, drx,dry,drz, dgripper].
-
-    button 0 closes the gripper, button 1 opens it.
-    """
-    from airo_teleop_agents.spacemouse_teleop_agents import SpaceMouse4PositionManipulator_ParallelGripper
-
-    return AiroTeleopAgent(SpaceMouse4PositionManipulator_ParallelGripper(None, None, action_mode="delta"))
 
 
 if __name__ == "__main__":

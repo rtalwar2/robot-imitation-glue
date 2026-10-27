@@ -187,3 +187,40 @@ class AiroTeleopAgent(BaseAgent):
         elif hasattr(self.teleop_device, "close"):
             # e.g. the SpaceMouse device, which reads the device in a thread
             self.teleop_device.close()
+
+
+def make_gello_agent(env, port: str, gello_config) -> AiroTeleopAgent:
+    """a Gello arm for the robot and gripper of `env`, returns [6 joints, gripper width in m].
+
+    the port and calibration (an airo-teleop GelloConfig) belong to the physical Gello. To get a target pose, the
+    station needs a joints-to-TCP-pose converter for its robot and tool, e.g. ur5station's
+    `convert_abs_gello_actions_to_se3`. When connecting, it asks to hold the Gello in the same pose as the robot.
+    """
+    from airo_teleop_agents.gello_teleop_agents import Gello4UR_ParallelGripper
+
+    return AiroTeleopAgent(Gello4UR_ParallelGripper(port, gello_config, env.robot, env.gripper))
+
+
+def make_spacemouse_agent(env, action_mode: str = "delta") -> AiroTeleopAgent:
+    """a SpaceMouse for the robot and gripper of `env`, button 0 closes the gripper, button 1 opens it.
+
+    "delta" returns [dx,dy,dz, drx,dry,drz, dgripper], use it with
+    `robot_imitation_glue.preprocessing.delta_action_to_abs_se3_converter`. "absolute" returns the new TCP pose and
+    gripper width, use it with `airo_teleop_se3_action_to_pose`.
+    """
+    from airo_teleop_agents.spacemouse_teleop_agents import SpaceMouse4PositionManipulator_ParallelGripper
+
+    return AiroTeleopAgent(
+        SpaceMouse4PositionManipulator_ParallelGripper(env.robot, env.gripper, action_mode=action_mode)
+    )
+
+
+def make_phone_agent(env, phone_config) -> AiroTeleopAgent:
+    """a phone (airo_teleop_phone.PhoneConfig, needs lerobot[phone]) for the robot of `env`.
+
+    returns the new TCP pose, use it with `airo_teleop_se3_action_to_pose`. The phone does not command the gripper,
+    so the gripper keeps its current width.
+    """
+    from airo_teleop_agents.phone_teleop_agents import Phone4PositionManipulator
+
+    return AiroTeleopAgent(Phone4PositionManipulator(env.robot, phone_config))

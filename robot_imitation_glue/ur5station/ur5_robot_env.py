@@ -15,7 +15,7 @@ from airo_teleop_devices.drivers.dynamixel_robot import DynamixelConfig
 from airo_teleop_devices.gello_teleop_device import GelloConfig
 from ur_analytic_ik import ur5e
 
-from robot_imitation_glue.agents.airo_teleop_agent import AiroTeleopAgent
+from robot_imitation_glue.agents.airo_teleop_agent import make_gello_agent
 from robot_imitation_glue.hardware.grippers.schunk_process import SchunkGripperProcess
 
 # the TCP offset is also needed by the offline dataset preparation (IK), so it is defined in the shared
@@ -125,16 +125,9 @@ GELLO_CONFIG = GelloConfig(
 )
 
 
-def make_gello_agent(env: UR5eStation) -> AiroTeleopAgent:
-    """the Gello arm of the station, asks to hold it in the same pose as the robot when connecting."""
-    from airo_teleop_agents.gello_teleop_agents import Gello4UR_ParallelGripper
-
-    return AiroTeleopAgent(Gello4UR_ParallelGripper(GELLO_AGENT_PORT, GELLO_CONFIG, env.robot, env.gripper))
-
-
 if __name__ == "__main__":
     env = UR5eStation()
-    agent = make_gello_agent(env)
+    agent = make_gello_agent(env, GELLO_AGENT_PORT, GELLO_CONFIG)
 
     cv2.namedWindow("wrist", cv2.WINDOW_NORMAL)
     cv2.namedWindow("scene", cv2.WINDOW_NORMAL)
