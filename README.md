@@ -47,8 +47,8 @@ Both are powered using our airo-mono repo, but you can freely select a control s
 [`robot_imitation_glue/ur5station/`](robot_imitation_glue/ur5station/): UR5e + Schunk EGK40 gripper, teleoperated with a
 Gello arm, with a scene and a wrist camera. Contains the env (`ur5_robot_env.py`), data collection
 (`data_collection.py`), dataset preparation (`prepare_datasets.py`, e.g. EEF to joint actions via IK), episode replay
-(`replay.py`), the LeRobot training configs (`lerobot_train/`) and evaluation of ACT, Diffusion Policy and pi0
-(`eval_*.py`).
+(`replay.py`), the LeRobot training configs (`lerobot_train/`), evaluation of LeRobot policies such as ACT and Diffusion
+Policy (`eval_lerobot.py`, `--state joints` or `eef`) and evaluation of pi0 (`eval_pi0.py`).
 
 ### UR3station
 

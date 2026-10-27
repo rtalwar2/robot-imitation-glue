@@ -37,7 +37,7 @@ airo = [
 lerobot = ["lerobot"]
 # vendored airo-teleop packages: teleop devices (Gello, SpaceMouse, phone) and their agents
 teleop = ["airo-teleop-devices", "airo-teleop-agents"]
-# learned policies that run in-process (baseline policy, eval_*_lerobot scripts)
+# learned policies that run in-process (baseline policy, eval_lerobot.py)
 baseline = ["torch", "torchvision"]
 # vendor SDKs for the concrete hardware of the UR3/UR5 stations
 hardware = [
