@@ -3,7 +3,7 @@
 Framework to reduce engineering efforts in using imitation learning for robot manipulation.
 
 Facilitates:
-- Dataset Collection (Lerobot dataset format) through **teleoperation** (Gello and Spacemouse supported but you can easily add others)
+- Dataset Collection (Lerobot dataset format) through **teleoperation** (Gello, SpaceMouse and phone via [airo-teleop](https://github.com/airo-ugent/airo-teleop), but you can easily add others)
 - Modifying/filtering **Lerobot Datasets**
 - Replaying datasets on real hardware (for debugging)
 - **Evaluating trained policies** on real hardware and save rollout observations(supports Lerobot ACT/ DP, OpenVLA, Pi0 and Pi-Fast but you can easily add others)
@@ -24,7 +24,7 @@ The code is written modularly so that you can easily:
 
 - policies and teleop devices are both abstracted as agents.
 
-- we assume a single robot arm + gripper. The default control interface is absolute end-effector poses + absolute gripper width (`BaseEnv.act`). Envs can also accept absolute joint configurations + gripper width (`BaseEnv.act_joints`, implemented by the UR5 station and the mock env); `ActionType` in `base.py` names the action spaces.
+- we assume a single robot arm + gripper. The default control interface is absolute end-effector poses + absolute gripper width (`BaseEnv.act`). Envs can also accept absolute joint configurations + gripper width (`BaseEnv.act_joints`, implemented by the station envs and the mock env); `ActionType` in `base.py` names the action spaces.
 
 - we use the Lerobot dataset format and tooling to store demonstrations and rollouts.
 
@@ -41,6 +41,13 @@ The code is written modularly so that you can easily:
 
 2 examples are available of how to integrate this codebase for your robot.
 Both are powered using our airo-mono repo, but you can freely select a control stack for your hardware.
+
+Both stations are a small subclass of `ManipulatorStation` ([`robot_imitation_glue/station_env.py`](robot_imitation_glue/station_env.py)),
+which works with any airo-robots `PositionManipulator` + parallel gripper and a wrist and scene camera. To add a
+station (e.g. a RealMan arm), create the robot and the camera factories in a new station file and override
+`preprocess_images`, `is_safe_pose` or `servo_gripper` where it differs. The teleop devices
+(`make_gello_agent`, `make_spacemouse_agent`, `make_phone_agent` in
+[`agents/airo_teleop_agent.py`](robot_imitation_glue/agents/airo_teleop_agent.py)) work with any station.
 
 ### UR5station
 
@@ -73,7 +80,7 @@ optional extra, so you can install only what you need instead of `--all-extras`:
 
 | extra | contents |
 | --- | --- |
-| `airo` | vendored `airo-ipc` + `airo-mono` packages (typing, dataset-tools, spatial-algebra, camera-toolkit, robots) |
+| `airo` | vendored `airo-ipc` + `airo-mono` packages (typing, dataset-tools, spatial-algebra, camera-toolkit, robots with the UR driver) |
 | `lerobot` | vendored `lerobot` fork: dataset recording/replay and the lerobot agents |
 | `teleop` | vendored `airo-teleop` packages: teleop devices (Gello, SpaceMouse, phone) and their agents |
 | `baseline` | `torch` / `torchvision`, for policies that run in-process |
