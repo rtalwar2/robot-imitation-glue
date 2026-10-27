@@ -28,7 +28,7 @@ dependencies = [
 airo = [
     "airo-ipc",
     "airo-typing",
-    "airo-dataset-tools",
+    "airo-dataset-tools", # not imported here, but required by airo-camera-toolkit: listed so uv uses the vendored copy
     "airo-spatial-algebra",
     "airo-camera-toolkit",
     "airo-robots",
@@ -43,7 +43,7 @@ baseline = ["torch", "torchvision"]
 hardware = [
     "bkstools", # also provides the `pyschunk` module
     "dynamixel-sdk",
-    "pyrealsense2",
+    "pyrealsense2", # not imported here, but the RealSense camera publishers of airo-camera-toolkit need it at runtime
     "pyspacemouse",
     "ur-analytic-ik",
 ]

@@ -119,6 +119,7 @@ def test_delta_action_converter_roundtrip():
     from robot_imitation_glue.preprocessing import (
         abs_se3_to_relative_policy_action_converter,
         delta_action_to_abs_se3_converter,
+        relative_policy_action_to_abs_se3_converter,
     )
 
     pose = _random_se3_pose(seed=2)
@@ -133,12 +134,10 @@ def test_delta_action_converter_roundtrip():
 
     # the relative encoding is expressed in the current EEF frame, so re-applying it to the current pose must
     # reproduce the target pose (the delta action itself is base-aligned, so it is not simply returned).
-    from scipy.spatial.transform import Rotation as R
+    decoded_pose, _ = relative_policy_action_to_abs_se3_converter(pose, gripper_state, relative_action)
+    np.testing.assert_allclose(decoded_pose, target_pose, atol=1e-5)
 
-    relative_se3 = np.eye(4)
-    relative_se3[:3, :3] = R.from_euler("xyz", relative_action[3:6].astype(np.float64)).as_matrix()
-    relative_se3[:3, 3] = relative_action[:3]
-    np.testing.assert_allclose(pose @ relative_se3, target_pose, atol=1e-5)
+    from scipy.spatial.transform import Rotation as R
 
     # the delta position is applied in the base frame
     np.testing.assert_allclose(target_pose[:3, 3], pose[:3, 3] + delta_action[:3], atol=1e-9)
@@ -161,3 +160,17 @@ def test_delta_action_converter_clips_gripper_width():
 
     _, gripper = delta_action_to_abs_se3_converter(pose, np.array([0.04]), action)
     assert gripper == pytest.approx(ROBOTIQ_2F85_MAX_WIDTH)
+
+
+def test_relative_policy_action_converter_binarizes_gripper():
+    pytest.importorskip("scipy")
+    from robot_imitation_glue.preprocessing import relative_policy_action_to_abs_se3_converter
+
+    action = np.zeros(7)
+    _, closed = relative_policy_action_to_abs_se3_converter(np.eye(4), 0.04, action)
+    action[6] = 0.7
+    pose, opened = relative_policy_action_to_abs_se3_converter(np.eye(4), 0.04, action)
+
+    assert closed == 0.0
+    assert opened == pytest.approx(ROBOTIQ_2F85_MAX_WIDTH)
+    np.testing.assert_allclose(pose, np.eye(4))

@@ -197,7 +197,7 @@ use it.
 | `remap_lerobot_keys.py` | Rename features to the `observation.*` keys the policies expect: `python -m robot_imitation_glue.lerobot_dataset.remap_lerobot_keys --root-dir <dir> --new-root-dir <dir> --feature-mapping '{"scene_image": "observation.images.scene_image"}'` |
 | `transform_dataset.py` | The generic building block: `transform_dataset(root_dir, new_root_dir, transform_fn, transform_features_fn, features_to_drop, episodes_to_drop)` — writes a new dataset frame by frame. Use it for anything the CLIs do not cover (see `ur5station/prepare_datasets.py` for a real example that converts rot6d EEF actions to joint actions with IK and drops a broken episode). |
 | `upload_dataset.py` | Push a local dataset to the HF hub. |
-| `uR3station/zero_action_remover.ipynb` | Notebook that drops near-zero actions and binarises the gripper action (used for OpenVLA). |
+| `ur3station/zero_action_remover.ipynb` | Notebook that drops near-zero actions and binarises the gripper action (used for OpenVLA). |
 
 Useful when writing a `transform_fn`: `transform_dataset` already strips the auto-generated
 `index`/`timestamp`/`frame_index`/`episode_index`/`task_index` fields, unsqueezes 0D tensors to 1D and

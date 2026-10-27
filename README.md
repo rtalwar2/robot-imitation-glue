@@ -52,8 +52,8 @@ Gello arm, with a scene and a wrist camera. Contains the env (`ur5_robot_env.py`
 
 ### UR3station
 
-[`robot_imitation_glue/uR3station/`](robot_imitation_glue/uR3station/): UR3e + Robotiq 2F-85 gripper, teleoperated with
-a SpaceMouse using relative (delta) actions. Contains the env (`robot_env.py`), data collection (`collect_data.py`) and
+[`robot_imitation_glue/ur3station/`](robot_imitation_glue/ur3station/): UR3e + Robotiq 2F-85 gripper, teleoperated with
+a SpaceMouse using relative (delta) actions. Contains the env (`ur3_robot_env.py`), data collection (`data_collection.py`) and
 OpenVLA evaluation (`eval_openvla.py`).
 
 
