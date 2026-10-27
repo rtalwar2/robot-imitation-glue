@@ -59,6 +59,7 @@ class UR5eStation(ManipulatorStation):
         logger.info("connecting to robot.")
         robot = URrtde(ROBOT_IP, URrtde.MANIPULATOR_SPECS[URrtde.URModels.UR5e], gripper=gripper)
 
+        input("Press Enter to move the robot to its home configuration (HOME_JOINTS)...")
         robot_awaitable = robot.move_to_joint_configuration(HOME_JOINTS)  # do not wait, let cameras initialize first
         super().__init__(robot, CameraFactory.create_wrist_camera, CameraFactory.create_scene_camera)
         robot_awaitable.wait()
@@ -138,8 +139,10 @@ if __name__ == "__main__":
     obs = env.get_observations()
     action = agent.get_action(obs)
     robot_se3, gripper = convert_abs_gello_actions_to_se3(env.get_robot_pose_se3(), env.get_gripper_opening(), action)
-    env.robot.servo_to_tcp_pose(robot_se3, 1.0)
+    # first move the robot slowly to the current teleop pose
+    env.move_robot_to_tcp_pose(robot_se3)
 
+    print("teleoperating, press q in an image window to quit")
     while True:
         loop_time = time.time()
         obs = env.get_observations()
@@ -158,7 +161,8 @@ if __name__ == "__main__":
         loop_duration = time.time() - loop_time
         # wait for 100ms - loop time
         key = cv2.waitKey(max(1, int(100 - loop_duration * 1000)))
+        if key == ord("q"):
+            break
 
-    env.robot.gripper.move(0.04).wait()
-    time.sleep(5)
-    env.robot.gripper.move(0.0).wait()
+    agent.close()
+    env.close()

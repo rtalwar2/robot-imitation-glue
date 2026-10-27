@@ -67,15 +67,19 @@ if __name__ == "__main__":
 
     train_dataset = LeRobotDataset(repo_id="", root=args.train_dataset)
     input("Press Enter to start evaluation (should hold your teleop in place now!)")
-    eval(
-        env,
-        teleop_agent,
-        pi0_agent,
-        dataset_recorder,
-        policy_to_pose_converter=abs_joint_policy_action_to_se3,
-        teleop_to_pose_converter=convert_abs_gello_actions_to_se3,
-        fps=10,
-        eval_dataset=train_dataset,
-        eval_dataset_image_key="scene_image",
-        env_observation_image_key="scene_image",
-    )
+    try:
+        eval(
+            env,
+            teleop_agent,
+            pi0_agent,
+            dataset_recorder,
+            policy_to_pose_converter=abs_joint_policy_action_to_se3,
+            teleop_to_pose_converter=convert_abs_gello_actions_to_se3,
+            fps=10,
+            eval_dataset=train_dataset,
+            eval_dataset_image_key="scene_image",
+            env_observation_image_key="scene_image",
+        )
+    finally:
+        teleop_agent.close()
+        env.close()

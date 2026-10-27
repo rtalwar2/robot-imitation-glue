@@ -275,15 +275,20 @@ def collect_data(  # noqa: C901
             # observation["target_abs_robot_se3e_pose"] = new_robot_target_se3_pose
             # observation["target_abs_gripper_pose"] = new_gripper_target_width
 
-            policy_formatted_action = abs_pose_to_policy_action(
-                target_pose, target_gripper_state, new_robot_target_se3_pose, new_gripper_target_width
-            )
-
-            env.act(
+            executed = env.act(
                 robot_pose_se3=new_robot_target_se3_pose,
                 gripper_pose=new_gripper_target_width,
                 timestamp=time.time() + control_period,
             )
+            if executed is False:
+                # not executed, so do not record it as a demonstration step, and continue from the robot pose
+                policy_formatted_action = None
+                new_robot_target_se3_pose = env.get_robot_pose_se3()
+            else:
+                # encoded after act(), which may have clipped the target pose in place
+                policy_formatted_action = abs_pose_to_policy_action(
+                    target_pose, target_gripper_state, new_robot_target_se3_pose, new_gripper_target_width
+                )
 
         if state.is_recording and policy_formatted_action is not None:
             dataset_recorder.record_step(observation, policy_formatted_action)

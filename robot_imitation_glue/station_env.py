@@ -138,7 +138,8 @@ class ManipulatorStation(BaseEnv):
         logger.debug(f"Moving robot to pose \n {robot_pose_se3} with duration {duration}")
 
         robot_pose_se3[:3, :3] = normalize_so3_matrix(robot_pose_se3[:3, :3])
-        if self.is_safe_pose(robot_pose_se3):
+        executed = self.is_safe_pose(robot_pose_se3)
+        if executed:
             self.robot.servo_to_tcp_pose(robot_pose_se3, duration)
 
         gripper_width = self._clip_gripper_width(gripper_pose)
@@ -146,7 +147,7 @@ class ManipulatorStation(BaseEnv):
         self.servo_gripper(gripper_width)
 
         # do not wait, handling timings is the responsibility of the caller
-        return
+        return executed
 
     def act_joints(self, robot_joints, gripper_pose, timestamp):
         duration = self._duration_until(timestamp)

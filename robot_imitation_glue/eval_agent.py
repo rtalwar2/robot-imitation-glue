@@ -27,15 +27,11 @@ logger = loguru.logger
 class State:
     rollout_active = False
     is_stopped = False
-    is_paused = False
 
 
 class Event:
     start_rollout = False
     stop_rollout = False
-    delete_last = False
-    pause = False
-    resume = False
     quit = False
 
     def clear(self):
@@ -60,20 +56,8 @@ def init_keyboard_listener(event: Event, state: State):
             elif key == keyboard.Key.enter and state.rollout_active:
                 event.stop_rollout = True
 
-            elif hasattr(key, "char") and key.char == "p" and not state.rollout_active and not state.is_paused:
-                # pause the episode
-                event.pause = True
-
-            elif hasattr(key, "char") and key.char == "p" and state.is_paused:
-                # resume the episode
-                event.resume = True
-
             elif hasattr(key, "char") and key.char == "q":
                 event.quit = True
-
-            elif hasattr(key, "char") and key.char == "d" and not state.rollout_active:
-                # delete the last episode
-                event.delete_last = True
         except Exception as e:
             print(f"Error handling key press: {e}")
 
@@ -231,11 +215,14 @@ def eval(  # noqa: C901
                 target_pose, target_gripper_state = teleop_to_pose_converter(target_pose, target_gripper_state, action)
                 logger.debug(f"robot_target_pose: {target_pose}")
 
-                env.act(
+                executed = env.act(
                     robot_pose_se3=target_pose,
                     gripper_pose=target_gripper_state,
                     timestamp=time.time() + control_period,
                 )
+                if executed is False:
+                    # refused by the env, continue from the robot pose instead of drifting away from it
+                    target_pose = env.get_robot_pose_se3()
 
             if cycle_end_time > time.time():
                 precise_wait(cycle_end_time)
@@ -303,11 +290,15 @@ def eval(  # noqa: C901
                 logger.debug(f"new_robot_target_pose: {new_robot_target_pose}")
                 logger.debug(f"current robot pose: {env.get_robot_pose_se3()}")
 
-                env.act(
+                # a refused pose is still recorded, as the eval dataset logs what the policy predicted
+                executed = env.act(
                     robot_pose_se3=new_robot_target_pose,
                     gripper_pose=new_target_gripper_state,
                     timestamp=time.time() + control_period,
                 )
+                if executed is False:
+                    # continue from the robot pose instead of drifting away from it
+                    new_robot_target_pose = env.get_robot_pose_se3()
 
             recorder.record_step(observations, action)
 

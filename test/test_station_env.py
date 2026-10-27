@@ -117,8 +117,9 @@ def test_unsafe_pose_is_not_executed(monkeypatch):
     env = make_station(monkeypatch)
     env.is_safe_pose = lambda pose: False
 
-    env.act(robot_pose_se3=np.eye(4), gripper_pose=0.02, timestamp=time.time())
+    executed = env.act(robot_pose_se3=np.eye(4), gripper_pose=0.02, timestamp=time.time())
 
+    assert executed is False
     assert env.robot.servo_poses == []
     assert env.gripper.commands == [0.02]
 

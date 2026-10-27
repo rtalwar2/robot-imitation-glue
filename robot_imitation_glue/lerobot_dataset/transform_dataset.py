@@ -121,6 +121,8 @@ def transform_dataset(  # noqa: C901
             if features_to_drop:
                 features_to_drop_list.extend(features_to_drop)
             frame = {k: v for k, v in frame.items() if k not in features_to_drop_list}
+            # the task is not a feature, the pinned lerobot takes it as an argument of add_frame
+            task = frame.pop("task")
 
             for key, value in frame.items():
                 # drop auto-generated meta data
@@ -137,7 +139,7 @@ def transform_dataset(  # noqa: C901
             new_frame = transform_fn(frame)
 
             # Add the transformed frame to the new dataset
-            new_dataset.add_frame(new_frame)
+            new_dataset.add_frame(new_frame, task=task)
 
         new_dataset.save_episode()
 
