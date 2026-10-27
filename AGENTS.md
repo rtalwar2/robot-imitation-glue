@@ -48,7 +48,7 @@ uv sync --frozen && uv run --frozen pytest test/   # exactly what .github/workfl
 ```
 robot_imitation_glue/
   base.py              BaseEnv, BaseAgent, BaseDatasetRecorder, ActionType, ActionSpec
-  collect_data.py      collect_data(): teleop loop + keyboard state machine + recording
+  collect_data.py      collect_data(): teleop loop + keyboard/teleop-button state machine + recording
   eval_agent.py        eval(): teleop to set the scene, then policy rollouts, recorded as a dataset
   dataset_recorder.py  LeRobotDatasetRecorder (feature spec inferred from an example obs dict)
   preprocessing.py     action encodings, state/key/image conversions shared by collection, dataset prep, eval

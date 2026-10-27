@@ -33,7 +33,7 @@ class State:
 class Event:
     start_recording = False
     stop_recording = False
-    delete_last = False
+    cancel_recording = False
     pause = False
     resume = False
     quit = False
@@ -71,9 +71,9 @@ def init_keyboard_listener(event: Event, state: State):
             elif hasattr(key, "char") and key.char == "q":
                 event.quit = True
 
-            elif hasattr(key, "char") and key.char == "d" and not state.is_recording:
-                # delete the last episode
-                event.delete_last = True
+            elif hasattr(key, "char") and key.char == "d" and state.is_recording:
+                # cancel the current episode
+                event.cancel_recording = True
         except Exception as e:
             print(f"Error handling key press: {e}")
 
@@ -81,6 +81,29 @@ def init_keyboard_listener(event: Event, state: State):
     listener.start()
 
     return listener
+
+
+# record buttons of a teleop device (e.g. the airo-teleop phone web UI) and the event each one triggers
+TELEOP_DEVICE_BUTTONS = {
+    "startRecording": "start_recording",
+    "stopRecording": "stop_recording",
+    "cancelRecording": "cancel_recording",
+}
+
+
+def read_teleop_device_buttons(teleop_agent, event: Event, pressed_before: dict) -> dict:
+    """set the same events as the keyboard when a record button of the teleop device is pressed.
+
+    only reacts to a button going from released to pressed, so a button that stays active does not trigger again.
+    devices without these buttons are ignored. returns the button states, pass them in on the next call.
+    """
+    teleop_device = getattr(teleop_agent, "teleop_device", None)
+    raw_inputs = getattr(teleop_device, "last_raw_inputs", None) or {}
+    pressed = {button: bool(raw_inputs.get(button)) for button in TELEOP_DEVICE_BUTTONS}
+    for button, event_name in TELEOP_DEVICE_BUTTONS.items():
+        if pressed[button] and not pressed_before.get(button):
+            setattr(event, event_name, True)
+    return pressed
 
 
 def collect_data(  # noqa: C901
@@ -96,6 +119,9 @@ def collect_data(  # noqa: C901
     confirm_joint_approach=confirm_joint_approach,
 ):
     """collect teleop demonstrations with the given env/agent pair.
+
+    Controls: Enter starts/stops recording an episode, d cancels the episode being recorded, p pauses/resumes the
+    teleop, q quits. The start/stop/cancel buttons of the teleop device (e.g. the airo-teleop phone web UI) do the same.
 
     The action space of the env/agent pair (env.ACTION_SPEC.action_type) determines which converters
     are used and how the actions are sent to the env:
@@ -140,6 +166,7 @@ def collect_data(  # noqa: C901
 
     target_pose = env.get_robot_pose_se3()
     target_gripper_state = env.get_gripper_opening()
+    teleop_buttons = {}
 
     while not state.is_stopped:
         cycle_end_time = time.time() + control_period
@@ -162,10 +189,10 @@ def collect_data(  # noqa: C901
             dataset_recorder.save_episode()
             # TODO: allow for textual description of the episode?
 
-        elif event.delete_last and not state.is_recording:
-            print("delete last episode")
-            # delete last episode
-            raise NotImplementedError("delete last episode not implemented")
+        elif state.is_recording and event.cancel_recording:
+            state.is_recording = False
+            print("cancel recording")
+            dataset_recorder.delete_episode()
 
         elif event.pause and not state.is_recording:
             state.is_paused = True
@@ -212,6 +239,7 @@ def collect_data(  # noqa: C901
             continue
 
         action = teleop_agent.get_action(observation)
+        teleop_buttons = read_teleop_device_buttons(teleop_agent, event, teleop_buttons)
         logger.info(f"Action: {action}")
 
         if is_joint_action:
