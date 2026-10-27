@@ -21,9 +21,8 @@ def to_chw_float_image(image: torch.Tensor) -> torch.Tensor:
     assert image.ndim == 3, f"expected an image with 3 dims, got shape {tuple(image.shape)}"
     if image.shape[0] not in (1, 3) and image.shape[-1] in (1, 3):  # HWC -> CHW
         image = image.permute(2, 0, 1)
-    image = image.float()
-    if image.max() > 1.0:  # assume the image was in the uint8 range
-        image = image / 255.0
+    # uint8 images are in [0, 255], float images (e.g. from a LeRobot dataset) already in [0, 1]
+    image = image.float() / 255.0 if image.dtype == torch.uint8 else image.float()
     if image.shape[0] == 1:  # grayscale -> RGB
         image = image.repeat(3, 1, 1)
     return image

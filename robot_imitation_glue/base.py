@@ -17,11 +17,6 @@ class ActionSpec:
     reference_frame = None
 
 
-class ProprioObservationSpec:
-    representation = None
-    reference_frame = None
-
-
 class BaseEnv(abc.ABC):
     ACTION_SPEC = None
     PROPRIO_OBS_SPEC = None

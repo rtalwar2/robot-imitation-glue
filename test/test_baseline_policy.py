@@ -5,7 +5,13 @@ torch = pytest.importorskip("torch")
 pytest.importorskip("torchvision")
 
 from robot_imitation_glue.baseline.agent import BaselineAgent  # noqa: E402
-from robot_imitation_glue.baseline.policy import BCPolicy, Normalizer, load_checkpoint, save_checkpoint  # noqa: E402
+from robot_imitation_glue.baseline.policy import (  # noqa: E402
+    BCPolicy,
+    Normalizer,
+    load_checkpoint,
+    save_checkpoint,
+    to_chw_float_image,
+)
 
 CAMERA_KEYS = ["observation.images.scene_image", "observation.images.wrist_image"]
 PROPRIO_DIM = 7
@@ -65,3 +71,12 @@ def test_agent_get_action_on_synthetic_observation(tmp_path):
     assert isinstance(action, np.ndarray)
     assert action.shape == (ACTION_DIM,)
     assert np.all(np.isfinite(action))
+
+
+def test_image_scaling_depends_on_dtype_not_content():
+    # a (nearly) black uint8 frame must be scaled like any other uint8 frame
+    dark = torch.ones((4, 4, 3), dtype=torch.uint8)
+    assert to_chw_float_image(dark).max().item() == pytest.approx(1 / 255)
+    # float images are already in [0, 1]
+    bright = torch.full((3, 4, 4), 0.5)
+    assert to_chw_float_image(bright).max().item() == pytest.approx(0.5)
