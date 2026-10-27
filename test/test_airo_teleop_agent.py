@@ -98,6 +98,21 @@ def test_reset_is_delegated():
     assert teleop_agent.n_reset_calls == 1
 
 
+def test_close_closes_the_device():
+    """airo-teleop agents have no close(), but e.g. the SpaceMouse device runs a reading thread."""
+
+    class FakeDevice:
+        closed = False
+
+        def close(self):
+            self.closed = True
+
+    device = FakeDevice()
+    AiroTeleopAgent(FakeTeleopAgent(example_pose(), teleop_device=device)).close()
+
+    assert device.closed
+
+
 def test_action_spec_is_exposed():
     action_spec = object()
     agent = AiroTeleopAgent(FakeTeleopAgent(example_pose()), action_spec=action_spec)

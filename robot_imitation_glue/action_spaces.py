@@ -41,7 +41,7 @@ def resolve_action_type(env, *agents) -> ActionType:
 
     - Declared specs (ACTION_SPEC is not None) must be equal: same action_type, representation and
       reference_frame. Otherwise a ValueError is raised.
-    - Nothing declared (still the case for e.g. the UR5/UR3 stations and the gello/spacemouse agents): this is
+    - Nothing declared (still the case for e.g. the UR5/UR3 stations and their teleop agents): this is
       the legacy setup, the actions are ABS_EEF poses as before joint actions existed.
     - Some components declare a spec and others do not: the undeclared ones cannot be checked. A warning is
       logged and the declared action type is used. This allows e.g. to use the (undeclared) UR5 station, which

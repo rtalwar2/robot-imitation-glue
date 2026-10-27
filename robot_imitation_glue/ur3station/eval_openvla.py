@@ -19,10 +19,9 @@ if __name__ == "__main__":
     from lerobot.common.datasets.lerobot_dataset import LeRobotDataset
 
     from robot_imitation_glue.agents.openvla_agent import OpenVLAAgent
-    from robot_imitation_glue.agents.spacemouse_agent import SpaceMouseAgent
     from robot_imitation_glue.dataset_recorder import LeRobotDatasetRecorder
     from robot_imitation_glue.eval_agent import eval
-    from robot_imitation_glue.ur3station.ur3_robot_env import UR3eStation
+    from robot_imitation_glue.ur3station.ur3_robot_env import UR3eStation, make_spacemouse_agent
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--eval-scenarios", default=EVAL_SCENARIOS_DATASET_PATH, help="dataset with initial scenes")
@@ -31,7 +30,7 @@ if __name__ == "__main__":
 
     env = UR3eStation()
     env.reset()
-    teleop_agent = SpaceMouseAgent()
+    teleop_agent = make_spacemouse_agent()
     policy_agent = OpenVLAAgent()
 
     if os.path.exists(args.eval_scenarios):

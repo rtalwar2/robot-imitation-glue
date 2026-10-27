@@ -25,7 +25,8 @@ without it installed; you only need it when you actually instantiate an airo-tel
 
 Action formats
 --------------
-An airo-teleop ``TeleopAgent.get_action()`` returns *absolute* targets, in one of three shapes:
+An airo-teleop ``TeleopAgent.get_action()`` returns *absolute* targets (except the delta mode below), in one of
+three shapes:
 
 1. a 1D array of joint angles, optionally with a gripper width appended (e.g. ``Gello4UR``);
 2. a 4x4 homogeneous TCP pose matrix (e.g. ``SpaceMouse4PositionManipulator``, ``Phone4PositionManipulator``);
@@ -38,9 +39,12 @@ that is already used elsewhere in this repo, and passes shape 1 (joint targets) 
 
 For the pose-based agents, :func:`airo_teleop_se3_action_to_pose` is the matching ``teleop_to_pose_converter``.
 For joint-space agents you need a converter that runs forward kinematics for your robot, e.g.
-``robot_imitation_glue.ur5station.ur5_robot_env.convert_abs_gello_actions_to_se3``. Note that airo-teleop's
-Gello agents already return the gripper target as an absolute width in meters, whereas the vendored Gello agent
-in this repo returns a normalized [0,1] value, so such a converter should not rescale the gripper value again.
+``robot_imitation_glue.ur5station.ur5_robot_env.convert_abs_gello_actions_to_se3``. airo-teleop's Gello agents
+return the gripper target as an absolute width in meters, so the converter should not rescale it.
+
+The SpaceMouse agents can also return delta actions (``action_mode="delta"``): a flat
+``[dx, dy, dz, drx, dry, drz(, dgripper)]`` array that is passed through unchanged, to be used with
+``robot_imitation_glue.preprocessing.delta_action_to_abs_se3_converter`` (see ``ur3station``).
 """
 
 import numpy as np
@@ -180,3 +184,6 @@ class AiroTeleopAgent(BaseAgent):
     def close(self):
         if hasattr(self.teleop_agent, "close"):
             self.teleop_agent.close()
+        elif hasattr(self.teleop_device, "close"):
+            # e.g. the SpaceMouse device, which reads the device in a thread
+            self.teleop_device.close()

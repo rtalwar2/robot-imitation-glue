@@ -10,7 +10,6 @@ import argparse
 import numpy as np
 from lerobot.common.datasets.lerobot_dataset import LeRobotDataset
 
-from robot_imitation_glue.agents.gello.gello_agent import GelloAgent
 from robot_imitation_glue.agents.lerobot_agent import LerobotAgent, make_lerobot_policy
 from robot_imitation_glue.dataset_recorder import LeRobotDatasetRecorder
 from robot_imitation_glue.eval_agent import eval
@@ -20,11 +19,10 @@ from robot_imitation_glue.preprocessing import (
     policy_action_to_abs_se3_converter,
 )
 from robot_imitation_glue.ur5station.ur5_robot_env import (
-    GELLO_AGENT_PORT,
     UR5eStation,
     abs_joint_policy_action_to_se3,
     convert_abs_gello_actions_to_se3,
-    dynamixel_config,
+    make_gello_agent,
 )
 
 # defaults of the command line arguments: edit them here or override them on the command line.
@@ -71,7 +69,7 @@ if __name__ == "__main__":
     env = UR5eStation()
     env.reset()
 
-    teleop_agent = GelloAgent(dynamixel_config, GELLO_AGENT_PORT)
+    teleop_agent = make_gello_agent(env)
 
     dataset_recorder = LeRobotDatasetRecorder(
         example_obs_dict=env.get_observations(),

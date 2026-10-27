@@ -3,7 +3,6 @@ from pathlib import Path
 
 import numpy as np
 
-from robot_imitation_glue.agents.gello import GelloAgent
 from robot_imitation_glue.collect_data import collect_data
 from robot_imitation_glue.dataset_recorder import LeRobotDatasetRecorder
 
@@ -14,10 +13,9 @@ from robot_imitation_glue.dataset_recorder import LeRobotDatasetRecorder
 from robot_imitation_glue.preprocessing import abs_se3_to_policy_action_converter  # noqa: F401
 from robot_imitation_glue.preprocessing import policy_action_to_abs_se3_converter  # noqa: F401
 from robot_imitation_glue.ur5station.ur5_robot_env import (
-    GELLO_AGENT_PORT,
     UR5eStation,
     convert_abs_gello_actions_to_se3,
-    dynamixel_config,
+    make_gello_agent,
 )
 
 if __name__ == "__main__":
@@ -30,7 +28,7 @@ if __name__ == "__main__":
 
     env = UR5eStation()
 
-    agent = GelloAgent(dynamixel_config, GELLO_AGENT_PORT)
+    agent = make_gello_agent(env)
 
     dataset_recorder = LeRobotDatasetRecorder(
         example_obs_dict=env.get_observations(),
