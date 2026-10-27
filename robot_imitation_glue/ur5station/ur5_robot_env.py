@@ -4,6 +4,7 @@ Environment for the UR5 station: a ZED scene camera, a RealSense wrist camera an
 
 import os
 import time
+from copy import deepcopy
 
 import cv2
 import loguru
@@ -11,8 +12,7 @@ import numpy as np
 from airo_camera_toolkit.cameras.realsense.realsense import Realsense
 from airo_camera_toolkit.cameras.zed.zed import Zed
 from airo_robots.manipulators.hardware.ur_rtde import URrtde
-from airo_teleop_devices.drivers.dynamixel_robot import DynamixelConfig
-from airo_teleop_devices.gello_teleop_device import GelloConfig
+from airo_teleop_devices.gello_teleop_device import GelloTeleopDevice
 from ur_analytic_ik import ur5e
 
 from robot_imitation_glue.agents.airo_teleop_agent import make_gello_agent
@@ -113,17 +113,10 @@ def abs_joint_policy_action_to_se3(current_pose, current_gripper_state, action: 
 # the Gello agent returns [6 joints, gripper width in m], the same format as the joint policy actions
 convert_abs_gello_actions_to_se3 = abs_joint_policy_action_to_se3
 
-# calibration of the station's Gello arm (airo-teleop's GELLO1_DEFAULT_CONFIG has a different offset for joint 6).
-# the trigger positions are in radians as read by airo-teleop, which wraps the released trigger to [-pi, pi].
+# the station's Gello arm is the one labeled "Gello1", its calibration lives in airo-teleop.
+# copied, because the Gello agent writes the robot's start joints into the config.
 # to recalibrate: airo-teleop-devices/calibration/gello_calibration.py
-GELLO_CONFIG = GelloConfig(
-    dynamixel_config=DynamixelConfig(
-        joint_ids=np.array([1, 2, 3, 4, 5, 6, 7]),
-        joint_offsets=np.array([40, 16, 25, 40, 15, 7, 0]) * np.pi / 16,
-        joint_signs=np.array([1, 1, -1, 1, 1, 1, 1]),
-    ),
-    gripper_config=(7, np.deg2rad(194 - 360), np.deg2rad(152 - 360)),
-)
+GELLO_CONFIG = deepcopy(GelloTeleopDevice.GELLO1_DEFAULT_CONFIG)
 
 
 if __name__ == "__main__":

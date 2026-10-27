@@ -139,5 +139,5 @@ the measured pose. Converters have the signatures `teleop_to_pose_converter(targ
   common pitfalls.
 - `robot_imitation_glue/agents/airo_teleop_agent.py` module docstring: airo-teleop action formats.
 - `robot_imitation_glue/baseline/train.py`, `train_dit.py` docstrings: training CLI examples.
-- Gello calibration: `GELLO_CONFIG` in `ur5station/ur5_robot_env.py`, recalibrate with airo-teleop's
-  `airo-teleop-devices/calibration/gello_calibration.py`.
+- Gello calibration: the UR5 uses airo-teleop's `GelloTeleopDevice.GELLO1_DEFAULT_CONFIG` (`GELLO_CONFIG` in
+  `ur5station/ur5_robot_env.py`); recalibrate with airo-teleop's `airo-teleop-devices/calibration/gello_calibration.py`.
