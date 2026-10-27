@@ -48,11 +48,15 @@ if __name__ == "__main__":
     # first move robot slowly to the current teleop pose.
     env.robot.move_linear_to_tcp_pose(initial_pose).wait()
 
-    collect_data(
-        env,
-        agent,
-        dataset_recorder,
-        frequency=10,
-        teleop_to_pose_converter=convert_abs_gello_actions_to_se3,
-        abs_pose_to_policy_action=abs_se3_to_policy_action_converter,
-    )
+    try:
+        collect_data(
+            env,
+            agent,
+            dataset_recorder,
+            frequency=10,
+            teleop_to_pose_converter=convert_abs_gello_actions_to_se3,
+            abs_pose_to_policy_action=abs_se3_to_policy_action_converter,
+        )
+    finally:
+        agent.close()
+        env.close()

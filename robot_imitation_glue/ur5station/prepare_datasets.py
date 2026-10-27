@@ -49,11 +49,11 @@ def joints_frame_transform(frame):
     tcp_transform = tcp_offset_transform()
 
     robot_joint_action = ur5e.inverse_kinematics_closest_with_tcp(robot_se3_action, tcp_transform, *current_joints)[0]
-    robot_joint_action[0] -= 2 * np.pi  # dirty hack to fix a bug in ur analytic IK
     robot_joint_action = np.array(robot_joint_action)
 
     new_frame = remap_to_lerobot_keys(frame)
-    new_frame["observation.state"] = concatenate_state(current_joints, gripper_action)
+    # the measured gripper width, as the eval preprocessors feed it (not the commanded width of the action)
+    new_frame["observation.state"] = concatenate_state(current_joints, frame["gripper_state"].numpy())
     new_frame["action"] = concatenate_state(robot_joint_action, gripper_action)
 
     return new_frame

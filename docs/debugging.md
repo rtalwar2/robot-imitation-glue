@@ -245,12 +245,14 @@ policies keep an internal queue. `eval()` calls `policy_agent.reset()` at the st
 write your own loop, do the same, otherwise the first actions of a rollout are leftovers from the previous
 one.
 
-**Actions can be silently rejected or clipped.** `UR5eStation.act()` refuses to execute when the target
-z < 0, when the pose is unreachable, or when the gripper points upwards, and it *clips* translations larger
-than `MAX_TRANSLATION = 0.15` m. It only logs a warning. A policy that appears to be "stuck" or to move at
-half speed is very often being clipped here, so read the warnings. Note also that `act()` normalises and
-clips `robot_pose_se3` in place, and both loops integrate targets (`target_pose = new_robot_target_pose`)
-rather than reading back the measured pose, so a clip propagates into the next step's target.
+**Actions can be rejected or clipped.** `UR5eStation.act()` (its `is_safe_pose`) refuses to execute when the
+target z < 0, when the pose is unreachable, or when the gripper points upwards, and returns `False`. A target
+more than `MAX_TRANSLATION = 0.15` m away is clipped to half of that, 7.5 cm, towards the target. Both only log
+a warning. A policy that appears to be "stuck" or to move at half speed is very often being clipped here, so
+read the warnings. `act()` normalises and clips `robot_pose_se3` in place, and both loops integrate targets
+(`target_pose = new_robot_target_pose`) rather than reading back the measured pose, so a clip propagates
+into the next step's target. After a refused pose both loops continue from the measured pose instead;
+`collect_data()` does not record the refused step, `eval()` still records what the policy predicted.
 
 **Recording into an existing directory continues that dataset.** `LeRobotDatasetRecorder` loads the dataset
 if `root_dataset_dir` exists and continues from `n_recorded_episodes` (`192543f` fixed the episode count
@@ -258,8 +260,8 @@ being read from `episode_data_index` instead of `episode_data_index["from"]`). I
 selects which episode of the `eval_dataset` is used as initial-scene reference, so a continued eval picks up
 the scenario list where it left off. If you want a fresh dataset, use a fresh directory.
 
-**Deleting the last episode during collection is not implemented.** Pressing `d` in `collect_data()` raises
-`NotImplementedError`. Finish the session and use `remove_lerobot_dataset_episode.py` instead.
+**Deleting an episode.** Pressing `d` in `collect_data()` cancels the episode that is being recorded. Saved
+episodes cannot be deleted during collection: finish the session and use `remove_lerobot_dataset_episode.py`.
 
 **Watch the loop timing.** `collect_data()` prints `cycle time exceeded control period` when a step takes
 longer than `1/frequency`; `get_observations()` and `LerobotAgent.get_action()` log their duration. If you

@@ -52,7 +52,6 @@ class LoopMockEnv(MockEnv):
         return {"scene_image": image, "wrist_image": image, "state": self.get_joint_configuration()}
 
     def act(self, robot_pose_se3, gripper_pose, timestamp):
-        # note: MockEnv names this argument `gripper_opening`, the loops (and BaseEnv) use `gripper_pose`.
         self.eef_actions.append((robot_pose_se3, gripper_pose))
         MockEnv.act(self, robot_pose_se3, gripper_pose, timestamp)
 
@@ -217,6 +216,41 @@ def test_eef_collection_still_integrates_target_pose(event_holder):
     assert len(actions) == 2
     np.testing.assert_allclose(actions[0][:2], initial_position + [1, 0])
     np.testing.assert_allclose(actions[1][:2], initial_position + [2, 0])
+
+
+class RefusingLoopMockEnv(LoopMockEnv):
+    """refuses the second EEF target, like a station env whose safety check rejects a pose"""
+
+    def act(self, robot_pose_se3, gripper_pose, timestamp):
+        self.eef_actions.append((robot_pose_se3, gripper_pose))
+        if len(self.eef_actions) == 2:
+            return False
+        MockEnv.act(self, robot_pose_se3, gripper_pose, timestamp)
+
+
+def test_refused_eef_target_is_not_recorded(event_holder):
+    env = RefusingLoopMockEnv(event_holder, EVENT_SCRIPT)
+    env.reset()
+    initial_position = env.get_joint_configuration().copy()
+    agent = ScriptedAgent(MockActionSpec, [np.array([1.0, 0.0, 0, 0, 0, 0, 0], dtype=np.float32)])
+    recorder = ListDatasetRecorder()
+
+    collect_data(
+        env,
+        agent,
+        recorder,
+        frequency=50,
+        teleop_to_pose_converter=mock_agent_to_pose_converter,
+        abs_pose_to_policy_action=mock_abs_pose_to_policy_action,
+    )
+
+    # the refused step is not part of the demonstration
+    actions = [action for _, action in recorder.episodes[0]]
+    assert len(actions) == 1
+    np.testing.assert_allclose(actions[0][:2], initial_position + [1, 0])
+    # after the refusal the target continues from the robot pose instead of drifting away from it
+    np.testing.assert_allclose(env.eef_actions[2][0][:2, 3], initial_position + [2, 0])
+    np.testing.assert_allclose(env.get_joint_configuration(), initial_position + [2, 0])
 
 
 def test_joint_jump_is_refused(event_holder):

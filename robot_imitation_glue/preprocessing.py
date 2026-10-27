@@ -142,6 +142,10 @@ def relative_policy_action_to_abs_se3_converter(
 
     the pose part is the inverse of `abs_se3_to_relative_policy_action_converter` (relative to the current EEF frame,
     XYZ euler angles). the gripper action is binarized: closed below 0.5, fully open (max_gripper_width) above.
+
+    NOTE: `abs_se3_to_relative_policy_action_converter` records the gripper as a *delta* width in m (the UR3
+    SpaceMouse steps of +-0.01), not as 0/1. Before training a policy for this converter, the recorded gripper
+    actions have to be binarized, as `ur3station/zero_action_remover.ipynb` does.
     """
     from scipy.spatial.transform import Rotation as R
 

@@ -32,6 +32,10 @@ class BaseEnv(abc.ABC):
 
     @abc.abstractmethod
     def act(self, robot_pose_se3, gripper_pose, timestamp):
+        """servo to an absolute target pose (4x4) and gripper width, non-blocking.
+
+        Returns False if the env refused the pose (e.g. a safety check), the robot then holds its pose. An env may
+        also adjust the pose in place (e.g. clip it). Returning None counts as executed."""
         raise NotImplementedError
 
     def act_joints(self, robot_joints, gripper_pose, timestamp):

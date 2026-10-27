@@ -52,14 +52,18 @@ if __name__ == "__main__":
         use_videos=True,
     )
 
-    eval(
-        env,
-        teleop_agent,
-        policy_agent,
-        dataset_recorder,
-        relative_policy_action_to_abs_se3_converter,
-        delta_action_to_abs_se3_converter,
-        fps=10,
-        eval_dataset=dataset,
-        eval_dataset_image_key="scene_image",
-    )
+    try:
+        eval(
+            env,
+            teleop_agent,
+            policy_agent,
+            dataset_recorder,
+            relative_policy_action_to_abs_se3_converter,
+            delta_action_to_abs_se3_converter,
+            fps=10,
+            eval_dataset=dataset,
+            eval_dataset_image_key="scene_image",
+        )
+    finally:
+        teleop_agent.close()
+        env.close()
