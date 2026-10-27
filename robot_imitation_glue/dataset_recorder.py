@@ -7,29 +7,6 @@ from lerobot.common.datasets.lerobot_dataset import LeRobotDataset
 from robot_imitation_glue.base import BaseDatasetRecorder
 
 
-class DummyDatasetRecorder(BaseDatasetRecorder):
-    def start_episode(self):
-        print("starting dataset episode recording")
-
-    def record_step(self, obs, action):
-        print("recording step")
-        print("saving obs:", obs)
-        print("saving action:", action)
-
-    def save_episode(self):
-        print("saving dataset episode")
-
-    def set_episode_success(self, success):
-        print("labeling dataset episode success:", success)
-
-    def delete_episode(self):
-        print("deleting dataset episode")
-
-    @property
-    def n_recorded_episodes(self):
-        return 0
-
-
 class LeRobotDatasetRecorder(BaseDatasetRecorder):
     DEFAULT_FEATURES = {
         "next.reward": {

@@ -171,10 +171,7 @@ def collect_data(  # noqa: C901
     while not state.is_stopped:
         cycle_end_time = time.time() + control_period
 
-        before_observation_time = time.time()
         observation = env.get_observations()
-        after_observation_time = time.time()
-        after_observation_time - before_observation_time
 
         # update & handle state machine events
         if not state.is_recording and event.start_recording:
@@ -317,16 +314,7 @@ if __name__ == "__main__":
 
     from robot_imitation_glue.dataset_recorder import LeRobotDatasetRecorder
     from robot_imitation_glue.mock import MockAgent, MockEnv, mock_agent_to_pose_converter
-
-    def mock_abs_pose_to_policy_action(robot_pose, gripper_pose, abs_se3_action, gripper_action):
-        """absolute poses, encoded as [pos(3), rot-x(3), rot-y(3), gripper]"""
-        del robot_pose, gripper_pose
-        policy_action = np.zeros(10, dtype=np.float32)
-        policy_action[:3] = abs_se3_action[:3, 3]
-        policy_action[3:6] = abs_se3_action[:3, 0]
-        policy_action[6:9] = abs_se3_action[:3, 1]
-        policy_action[9] = gripper_action
-        return policy_action
+    from robot_imitation_glue.preprocessing import abs_se3_to_policy_action_converter
 
     env = MockEnv()
     env.reset()
@@ -356,5 +344,5 @@ if __name__ == "__main__":
         dataset_recorder,
         frequency=10,
         teleop_to_pose_converter=mock_agent_to_pose_converter,
-        abs_pose_to_policy_action=mock_abs_pose_to_policy_action,
+        abs_pose_to_policy_action=abs_se3_to_policy_action_converter,
     )

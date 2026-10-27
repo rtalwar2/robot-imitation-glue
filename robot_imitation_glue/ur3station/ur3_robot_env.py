@@ -10,7 +10,6 @@ import numpy as np
 from airo_camera_toolkit.cameras.realsense.realsense import Realsense
 from airo_robots.grippers.hardware.robotiq_2f85_urcap import Robotiq2F85
 from airo_robots.manipulators.hardware.ur_rtde import URrtde
-from airo_spatial_algebra.se3 import SE3Container
 
 from robot_imitation_glue.station_env import ManipulatorStation
 
@@ -50,31 +49,8 @@ class UR3eStation(ManipulatorStation):
 
 
 if __name__ == "__main__":
-    # set cli logging level to debug
-
-    def convert_relative_to_absolute_action(current_robot_pose, current_gripper_width, action: np.ndarray):
-        """
-        Convert a relative action to an absolute action
-        Args:
-            action: [x,y,z, rx,ry,rz,gripper]. relative target pose in robot base frame (euler angles) and absolute gripper width
-            current_robot_pose: [x,y,z, rx,ry,rz]. current robot pose in robot base frame using Euler angles
-            current_gripper_width: current gripper width
-
-        Returns:
-            [x,y,z, rx,ry,rz,gripper]. absolute target pose in robot base frame (rotation vector) and absolute gripper width
-        """
-        current_robot_pose_se3 = SE3Container.from_euler_angles_and_translation(
-            current_robot_pose[3:6], current_robot_pose[0:3]
-        ).homogeneous_matrix
-
-        relative_robot_pose = SE3Container.from_euler_angles_and_translation(
-            action[3:6], action[0:3]
-        ).homogeneous_matrix
-        target_pose_se3 = current_robot_pose_se3 @ relative_robot_pose
-
-        target_gripper_width = action[6] + current_gripper_width
-
-        return target_pose_se3, target_gripper_width
+    # moves the robot up and down between z = 0.1 and 0.2 m while showing the cameras, press q to quit
+    from robot_imitation_glue.preprocessing import delta_action_to_abs_se3_converter
 
     env = UR3eStation()
     cv2.namedWindow("wrist", cv2.WINDOW_NORMAL)
@@ -83,28 +59,21 @@ if __name__ == "__main__":
     cv2.resizeWindow("scene", 640, 480)
 
     direction = 1
-    z_actions = []
-    z_positions = []
     while True:
         obs = env.get_observations()
-        print(time.time())
-        print(obs["wrist_image"].shape)
         cv2.imshow("wrist", obs["wrist_image"])
         cv2.imshow("scene", obs["scene_image"])
 
-        current_pose = obs["robot_pose"]
-        current_z = current_pose[2]
-        print(current_z)
+        current_z = obs["robot_pose"][2]
         if current_z > 0.2:
-            direction = 1
-        elif current_z < 0.1:
             direction = -1
-        z_action = 0.02 * direction
-        gripper_action = 0.005 if direction == 1 else -0.005
-        action = np.array([0, 0, z_action, 0, 0, z_action, 0])
-        logger.debug(f"Taking action {action}")
-        logger.debug(f"Current pose {current_pose}")
-
-        robot_se3, gripper = convert_relative_to_absolute_action(current_pose, obs["gripper_state"], action)
+        elif current_z < 0.1:
+            direction = 1
+        # [dx,dy,dz, drx,dry,drz, dgripper]: move along z and rotate around z, gripper unchanged
+        action = np.array([0, 0, 0.02 * direction, 0, 0, 0.02 * direction, 0])
+        robot_se3, gripper = delta_action_to_abs_se3_converter(env.get_robot_pose_se3(), obs["gripper_state"], action)
         env.act(robot_pose_se3=robot_se3, gripper_pose=gripper, timestamp=time.time() + 0.1)
-        key = cv2.waitKey(100)
+        if cv2.waitKey(100) == ord("q"):
+            break
+
+    env.close()

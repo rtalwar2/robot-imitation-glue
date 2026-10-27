@@ -335,10 +335,6 @@ class SchunkGripperProcess(ParallelPositionGripper):
         # check if speed is above minimum
         return abs(self.get_current_velocity()) > 1e-6
 
-    def grasp_object(self) -> AwaitableAction:
-        self._send_command_and_wait_for_result(GripperCommand(cmd_type="grip"))
-        return AwaitableAction(self.is_moving)
-
 
 if __name__ == "__main__":
     # Example usage

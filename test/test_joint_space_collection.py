@@ -15,6 +15,7 @@ from robot_imitation_glue.action_spaces import (
 from robot_imitation_glue.base import ActionSpec, ActionType, BaseAgent, BaseDatasetRecorder, BaseEnv
 from robot_imitation_glue.collect_data import collect_data
 from robot_imitation_glue.mock import MockActionSpec, MockEnv, mock_agent_to_pose_converter
+from robot_imitation_glue.preprocessing import abs_se3_to_policy_action_converter
 
 
 class JointActionSpec(ActionSpec):
@@ -101,17 +102,6 @@ class ListDatasetRecorder(BaseDatasetRecorder):
     @property
     def n_recorded_episodes(self):
         return len(self.episodes)
-
-
-def mock_abs_pose_to_policy_action(robot_pose, gripper_pose, abs_se3_action, gripper_action):
-    """absolute poses, encoded as [pos(3), rot-x(3), rot-y(3), gripper]"""
-    del robot_pose, gripper_pose
-    policy_action = np.zeros(10, dtype=np.float32)
-    policy_action[:3] = abs_se3_action[:3, 3]
-    policy_action[3:6] = abs_se3_action[:3, 0]
-    policy_action[6:9] = abs_se3_action[:3, 1]
-    policy_action[9] = gripper_action
-    return policy_action
 
 
 @pytest.fixture
@@ -202,7 +192,7 @@ def test_eef_collection_still_integrates_target_pose(event_holder):
         recorder,
         frequency=50,
         teleop_to_pose_converter=mock_agent_to_pose_converter,
-        abs_pose_to_policy_action=mock_abs_pose_to_policy_action,
+        abs_pose_to_policy_action=abs_se3_to_policy_action_converter,
     )
 
     # the EEF actions were sent to act, the joint path was not used at all
@@ -241,7 +231,7 @@ def test_refused_eef_target_is_not_recorded(event_holder):
         recorder,
         frequency=50,
         teleop_to_pose_converter=mock_agent_to_pose_converter,
-        abs_pose_to_policy_action=mock_abs_pose_to_policy_action,
+        abs_pose_to_policy_action=abs_se3_to_policy_action_converter,
     )
 
     # the refused step is not part of the demonstration
