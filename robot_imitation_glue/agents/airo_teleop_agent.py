@@ -25,7 +25,8 @@ without it installed; you only need it when you actually instantiate an airo-tel
 
 Action formats
 --------------
-An airo-teleop ``TeleopAgent.get_action()`` returns *absolute* targets, in one of three shapes:
+An airo-teleop ``TeleopAgent.get_action()`` returns *absolute* targets (except the delta mode below), in one of
+three shapes:
 
 1. a 1D array of joint angles, optionally with a gripper width appended (e.g. ``Gello4UR``);
 2. a 4x4 homogeneous TCP pose matrix (e.g. ``SpaceMouse4PositionManipulator``, ``Phone4PositionManipulator``);
@@ -38,9 +39,12 @@ that is already used elsewhere in this repo, and passes shape 1 (joint targets) 
 
 For the pose-based agents, :func:`airo_teleop_se3_action_to_pose` is the matching ``teleop_to_pose_converter``.
 For joint-space agents you need a converter that runs forward kinematics for your robot, e.g.
-``robot_imitation_glue.ur5station.ur5_robot_env.convert_abs_gello_actions_to_se3``. Note that airo-teleop's
-Gello agents already return the gripper target as an absolute width in meters, whereas the vendored Gello agent
-in this repo returns a normalized [0,1] value, so such a converter should not rescale the gripper value again.
+``robot_imitation_glue.ur5station.ur5_robot_env.convert_abs_gello_actions_to_se3``. airo-teleop's Gello agents
+return the gripper target as an absolute width in meters, so the converter should not rescale it.
+
+The SpaceMouse agents can also return delta actions (``action_mode="delta"``): a flat
+``[dx, dy, dz, drx, dry, drz(, dgripper)]`` array that is passed through unchanged, to be used with
+``robot_imitation_glue.preprocessing.delta_action_to_abs_se3_converter`` (see ``ur3station``).
 """
 
 import numpy as np
@@ -180,3 +184,43 @@ class AiroTeleopAgent(BaseAgent):
     def close(self):
         if hasattr(self.teleop_agent, "close"):
             self.teleop_agent.close()
+        elif hasattr(self.teleop_device, "close"):
+            # e.g. the SpaceMouse device, which reads the device in a thread
+            self.teleop_device.close()
+
+
+def make_gello_agent(env, port: str, gello_config) -> AiroTeleopAgent:
+    """a Gello arm for the robot and gripper of `env`, returns [6 joints, gripper width in m].
+
+    the port and calibration (an airo-teleop GelloConfig) belong to the physical Gello. To get a target pose, the
+    station needs a joints-to-TCP-pose converter for its robot and tool, e.g. ur5station's
+    `convert_abs_gello_actions_to_se3`. When connecting, it asks to hold the Gello in the same pose as the robot.
+    """
+    from airo_teleop_agents.gello_teleop_agents import Gello4UR_ParallelGripper
+
+    return AiroTeleopAgent(Gello4UR_ParallelGripper(port, gello_config, env.robot, env.gripper))
+
+
+def make_spacemouse_agent(env, action_mode: str = "delta") -> AiroTeleopAgent:
+    """a SpaceMouse for the robot and gripper of `env`, button 0 closes the gripper, button 1 opens it.
+
+    "delta" returns [dx,dy,dz, drx,dry,drz, dgripper], use it with
+    `robot_imitation_glue.preprocessing.delta_action_to_abs_se3_converter`. "absolute" returns the new TCP pose and
+    gripper width, use it with `airo_teleop_se3_action_to_pose`.
+    """
+    from airo_teleop_agents.spacemouse_teleop_agents import SpaceMouse4PositionManipulator_ParallelGripper
+
+    return AiroTeleopAgent(
+        SpaceMouse4PositionManipulator_ParallelGripper(env.robot, env.gripper, action_mode=action_mode)
+    )
+
+
+def make_phone_agent(env, phone_config) -> AiroTeleopAgent:
+    """a phone (airo_teleop_phone.PhoneConfig, needs lerobot[phone]) for the robot of `env`.
+
+    returns the new TCP pose, use it with `airo_teleop_se3_action_to_pose`. The phone does not command the gripper,
+    so the gripper keeps its current width.
+    """
+    from airo_teleop_agents.phone_teleop_agents import Phone4PositionManipulator
+
+    return AiroTeleopAgent(Phone4PositionManipulator(env.robot, phone_config))

@@ -236,7 +236,7 @@ every HWC uint8 image with `resize_with_pad` to 224x224 *on top of* whatever you
 converter. On the UR5 station there are at least three formats in circulation: 10-dim
 position+rot6d+gripper (`abs_se3_to_policy_action_converter` /`policy_action_to_abs_se3_converter` in
 `ur5station/data_collection.py`), 7-dim absolute joints+gripper (`abs_joint_policy_action_to_se3`, produced
-by `prepare_datasets.py`), and the Gello teleop format (`convert_abs_gello_actions_to_se3`). `collect_data`
+by `prepare_datasets.py`), and the Gello teleop format (`convert_abs_gello_actions_to_se3`, the same joints + gripper width). `collect_data`
 asserts `env.ACTION_SPEC == teleop_agent.ACTION_SPEC`, but both are `None` on the current stations, so that
 assert protects nothing — check the converters by hand, and confirm with a replay (section 1).
 

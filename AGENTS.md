@@ -48,13 +48,13 @@ uv sync --frozen && uv run --frozen pytest test/   # exactly what .github/workfl
 ```
 robot_imitation_glue/
   base.py              BaseEnv, BaseAgent, BaseDatasetRecorder, ActionType, ActionSpec
-  collect_data.py      collect_data(): teleop loop + keyboard state machine + recording
+  collect_data.py      collect_data(): teleop loop + keyboard/teleop-button state machine + recording
   eval_agent.py        eval(): teleop to set the scene, then policy rollouts, recorded as a dataset
   dataset_recorder.py  LeRobotDatasetRecorder (feature spec inferred from an example obs dict)
   preprocessing.py     action encodings, state/key/image conversions shared by collection, dataset prep, eval
   action_spaces.py     EEF vs joint action space of an env/agent pair, joint-target safety check
   mock.py              MockEnv / MockAgent / mock_agent_to_pose_converter (no hardware)
-  agents/              gello/, spacemouse_agent, airo_teleop_agent (adapter), lerobot_agent,
+  agents/              airo_teleop_agent (adapter for the airo-teleop Gello/SpaceMouse/phone), lerobot_agent,
                        openvla_agent, openpi_agent
   baseline/            plain-pytorch policies: BC (policy/train/agent) and DiT flow matching
                        (dit_policy/train_dit/dit_agent); read datasets through lerobot only
@@ -82,12 +82,12 @@ the measured pose. Converters have the signatures `teleop_to_pose_converter(targ
   `collect_data` asserts `env.ACTION_SPEC == teleop_agent.ACTION_SPEC`, but both are `None` on the real
   stations. Formats in use: UR5 raw collection = 10-dim absolute `[xyz, rot x-axis, rot y-axis, gripper]`
   in the robot base frame (`ur5station/data_collection.py`); UR5 prepared = 7-dim absolute
-  `[6 joints, gripper]` (`abs_joint_policy_action_to_se3`); Gello = 7-dim joints + normalised gripper
-  (`convert_abs_gello_actions_to_se3`, maps to width as `(1 - g) * 0.08`); airo-teleop poses = 9-dim
+  `[6 joints, gripper]` (`abs_joint_policy_action_to_se3`); Gello = the same 7-dim joints + gripper width
+  (`convert_abs_gello_actions_to_se3`, the UR5's airo-teleop `Gello4UR_ParallelGripper`); airo-teleop poses = 9-dim
   absolute `[xyz, x-axis, y-axis]` (+ optional gripper width) via `SE3_ACTION_DIM` in
   `agents/airo_teleop_agent.py`; UR3 = 7-dim relative `[dxyz, d-euler xyz, d-gripper]` expressed in the
   current EEF frame (`abs_se3_to_relative_policy_action_converter`, used in `ur3station/data_collection.py`), while its
-  SpaceMouse teleop deltas are base-aligned (`delta_action_to_abs_se3_converter`). A wrong
+  SpaceMouse teleop deltas (airo-teleop, `action_mode="delta"`) are base-aligned (`delta_action_to_abs_se3_converter`). A wrong
   converter does not raise, it moves the robot elsewhere; confirm with a replay.
 - **`ActionType` / `act_joints`.** `collect_data()` and `eval()` pick the action space with
   `action_spaces.resolve_action_type(env, agent)`: EEF actions go through the pose converters to `env.act()`,
@@ -122,8 +122,8 @@ the measured pose. Converters have the signatures `teleop_to_pose_converter(targ
 
 ## Safety rules for agents
 
-- Never run anything under `ur5station/`, `ur3station/`, `agents/gello/`, `agents/spacemouse_agent.py`,
-  `hardware/`, `lerobot_dataset/replay_episode.py`, or the `__main__` of `collect_data.py` / `eval_agent.py`.
+- Never run anything under `ur5station/`, `ur3station/`, `hardware/`, `lerobot_dataset/replay_episode.py`, or the
+  `__main__` of `collect_data.py` / `eval_agent.py`.
   These move a robot, open cameras or grippers, or grab the keyboard. Only a human operator at the station
   runs them; prepare the command and hand it over. Importing these modules is fine (no side effects at import).
 - Do not loosen the safety checks in `UR5eStation.act()` (z < 0, unreachable pose, gripper pointing up,
@@ -139,4 +139,5 @@ the measured pose. Converters have the signatures `teleop_to_pose_converter(targ
   common pitfalls.
 - `robot_imitation_glue/agents/airo_teleop_agent.py` module docstring: airo-teleop action formats.
 - `robot_imitation_glue/baseline/train.py`, `train_dit.py` docstrings: training CLI examples.
-- `robot_imitation_glue/agents/gello/readme.md`: Gello calibration.
+- Gello calibration: `GELLO_CONFIG` in `ur5station/ur5_robot_env.py`, recalibrate with airo-teleop's
+  `airo-teleop-devices/calibration/gello_calibration.py`.

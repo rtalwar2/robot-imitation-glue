@@ -4,7 +4,7 @@ from pathlib import Path
 
 import numpy as np
 
-from robot_imitation_glue.agents.spacemouse_agent import SpaceMouseAgent
+from robot_imitation_glue.agents.airo_teleop_agent import make_spacemouse_agent
 from robot_imitation_glue.collect_data import collect_data
 from robot_imitation_glue.dataset_recorder import LeRobotDatasetRecorder
 
@@ -27,7 +27,7 @@ def main():
 
     # connects to the robot, the cameras and the SpaceMouse: only run this at the station.
     env = UR3eStation()
-    agent = SpaceMouseAgent()
+    agent = make_spacemouse_agent(env)
 
     if not os.path.exists("datasets"):
         os.makedirs("datasets")
