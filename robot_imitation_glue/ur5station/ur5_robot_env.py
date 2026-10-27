@@ -151,10 +151,6 @@ class UR5eStation(BaseEnv):
     def get_gripper_opening(self):
         return np.array([self.gripper.get_current_width()])
 
-    def _set_robot_target_pose(self, target_pose):
-        # target_pose is a 4x4 homogeneous transformation matrix
-        self.robot.servo_to_tcp_pose()
-
     def get_observations(self):
 
         start_time = time.time()

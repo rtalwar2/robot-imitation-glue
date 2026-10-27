@@ -25,6 +25,7 @@ repos:
         files: \.py$
         args:
           - --thirdparty=wandb
+          - --thirdparty=lerobot
 
 -   repo: https://github.com/psf/black
     rev: 25.1.0

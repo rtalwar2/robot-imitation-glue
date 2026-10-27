@@ -163,7 +163,6 @@ class SchunkGripperProcess(ParallelPositionGripper):
         if command.cmd_type == "move_pos":
             # if non-blocking, put result in queue immediately, signalling that the command was received
             if command.params and command.params.get("blocking", True) is False:
-                # print("non-blocking command; putting result in queue")
                 result_queue.put({"success": True, "result": None})
 
             # check if the gripper was unable to reach its previous target, in this case we only move if
@@ -173,7 +172,6 @@ class SchunkGripperProcess(ParallelPositionGripper):
             last_target_pos = last_target_position.value
 
             if abs(actual_pos - last_target_pos) > 0.1:  # gripper did not reach its previous target
-                # print(f"gripper did not reach its previous target: {actual_pos} != {last_target_pos}")
                 # if new target is same direction: do not execute.
                 if last_target_pos > actual_pos and command.params.get("position") > actual_pos:
                     return True
@@ -260,7 +258,6 @@ class SchunkGripperProcess(ParallelPositionGripper):
         self._cmd_queue.put(command)
         result = self._result_queue.get(timeout=1.0)
         if result["success"]:
-            # print(f"command executed successfully: {command}, result={result}")
             return result["result"]
         else:
             raise RuntimeError(f"Failed to execute command: {command}, result={result}")

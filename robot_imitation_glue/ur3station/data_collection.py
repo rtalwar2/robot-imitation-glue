@@ -1,7 +1,8 @@
+import argparse
 import os
 from pathlib import Path
 
-import numpy as np  # Missing import for np
+import numpy as np
 
 from robot_imitation_glue.agents.spacemouse_agent import SpaceMouseAgent
 from robot_imitation_glue.collect_data import collect_data
@@ -13,12 +14,17 @@ from robot_imitation_glue.preprocessing import (
     abs_se3_to_relative_policy_action_converter,
     delta_action_to_abs_se3_converter,
 )
-from robot_imitation_glue.uR3station.robot_env import UR3eStation
+from robot_imitation_glue.ur3station.ur3_robot_env import UR3eStation
 
-dataset_name = "test_dataset"
+# default of the command line argument: edit it here or override it on the command line.
+DATASET_NAME = "test_dataset"
 
 
 def main():
+    parser = argparse.ArgumentParser(description="Collect SpaceMouse demonstrations on the UR3 station.")
+    parser.add_argument("--dataset-name", default=DATASET_NAME, help="name of the recorded dataset")
+    args = parser.parse_args()
+
     # connects to the robot, the cameras and the SpaceMouse: only run this at the station.
     env = UR3eStation()
     agent = SpaceMouseAgent()
@@ -28,8 +34,8 @@ def main():
     dataset_recorder = LeRobotDatasetRecorder(
         example_obs_dict=env.get_observations(),
         example_action=np.zeros((7,), dtype=np.float32),
-        root_dataset_dir=Path(f"datasets/{dataset_name}"),
-        dataset_name=dataset_name,
+        root_dataset_dir=Path(f"datasets/{args.dataset_name}"),
+        dataset_name=args.dataset_name,
         fps=10,
         use_videos=True,
     )

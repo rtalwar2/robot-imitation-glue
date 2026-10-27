@@ -148,7 +148,6 @@ def collect_data(  # noqa: C901
         observation = env.get_observations()
         after_observation_time = time.time()
         after_observation_time - before_observation_time
-        # print("observation time: ", observation_time)
 
         # update & handle state machine events
         if not state.is_recording and event.start_recording:

@@ -114,10 +114,6 @@ class UR3eStation(BaseEnv):
     def get_gripper_opening(self):
         return np.array([self.gripper.get_current_width()])
 
-    def _set_robot_target_pose(self, target_pose):
-        # target_pose is a 4x4 homogeneous transformation matrix
-        self.robot.servo_to_tcp_pose()
-
     def get_observations(self):
 
         wrist_image = self._wrist_camera_subscriber.get_rgb_image_as_int()

@@ -2,11 +2,11 @@ import time
 
 import numpy as np
 import torch
-from loguru import logger
-
 from lerobot.common.datasets.lerobot_dataset import LeRobotDataset
 from lerobot.common.policies.diffusion.configuration_diffusion import PreTrainedConfig
 from lerobot.common.policies.factory import make_policy
+from loguru import logger
+
 from robot_imitation_glue.base import BaseAgent
 
 
@@ -63,9 +63,17 @@ class LerobotAgent(BaseAgent):
 
 
 if __name__ == "__main__":
+    import argparse
 
-    path = "/home/tlips/Code/robot-imitation-glue/outputs/train/2025-04-10/13-15-24_pick-cube_diffusion/checkpoints/030000/pretrained_model"
-    dataset_path = "/home/tlips/Code/robot-imitation-glue/datasets/pick-cube-remapped"
+    # defaults of the command line arguments: edit them here or override them on the command line.
+    CHECKPOINT_PATH = "outputs/train/pick-cube_diffusion/checkpoints/030000/pretrained_model"
+    DATASET_PATH = "datasets/pick-cube-remapped"
+
+    parser = argparse.ArgumentParser(description="Smoke-test a LeRobot checkpoint on random observations.")
+    parser.add_argument("--checkpoint", default=CHECKPOINT_PATH, help="pretrained_model dir of the checkpoint")
+    parser.add_argument("--dataset", default=DATASET_PATH, help="dataset the policy was trained on")
+    args = parser.parse_args()
+    path, dataset_path = args.checkpoint, args.dataset
 
     policy = make_lerobot_policy(path, dataset_path).cpu()
 

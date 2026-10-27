@@ -135,6 +135,25 @@ def abs_se3_to_relative_policy_action_converter(robot_pose, gripper_pose, abs_se
     return np.concatenate((relative_pos, relative_euler, relative_gripper), axis=0).astype(np.float32)
 
 
+def relative_policy_action_to_abs_se3_converter(
+    robot_pose, gripper_state, action, max_gripper_width=ROBOTIQ_2F85_MAX_WIDTH
+):
+    """decode a relative policy action [x,y,z, rx,ry,rz, gripper] into an absolute SE3 pose + gripper width.
+
+    the pose part is the inverse of `abs_se3_to_relative_policy_action_converter` (relative to the current EEF frame,
+    XYZ euler angles). the gripper action is binarized: closed below 0.5, fully open (max_gripper_width) above.
+    """
+    from scipy.spatial.transform import Rotation as R
+
+    relative_se3 = np.eye(4)
+    relative_se3[:3, :3] = R.from_euler("xyz", action[3:6]).as_matrix()
+    relative_se3[:3, 3] = action[0:3]
+    target_pose_se3 = robot_pose @ relative_se3
+
+    new_gripper_state = 0.0 if action[6] < 0.5 else max_gripper_width
+    return target_pose_se3, new_gripper_state
+
+
 # ---------------------------------------------------------------------------------------------------------------
 # proprioception
 # ---------------------------------------------------------------------------------------------------------------

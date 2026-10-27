@@ -30,7 +30,6 @@ from pathlib import Path
 
 import numpy as np
 from huggingface_hub import HfApi
-
 from lerobot.common.datasets.compute_stats import aggregate_stats
 from lerobot.common.datasets.lerobot_dataset import LeRobotDataset, LeRobotDatasetMetadata
 from lerobot.common.datasets.utils import (
@@ -179,17 +178,6 @@ def _update_dataset_files(new_meta: LeRobotDatasetMetadata, episodes_to_remove: 
             for file_path, update_func in metadata_files.items():
                 _move_file(new_meta.root / file_path, backup_dir / file_path)
                 update_func()
-
-            # # Step 2: Update data and video
-            # rel_data_paths = [new_meta.get_data_file_path(ep_idx) for ep_idx in episodes_to_remove]
-            # rel_video_paths = [
-            #     new_meta.get_video_file_path(ep_idx, vid_key)
-            #     for ep_idx in episodes_to_remove
-            #     for vid_key in new_meta.video_keys
-            # ]
-            # for rel_path in rel_data_paths + rel_video_paths:
-            #     if (new_meta.root / rel_path).exists():
-            #         _move_file(new_meta.root / rel_path, backup_dir / rel_path)
 
         except Exception as e:
             logging.error(f"Error updating dataset files: {str(e)}. Rolling back changes.")

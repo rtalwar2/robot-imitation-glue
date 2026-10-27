@@ -1,6 +1,10 @@
-import numpy as np
+"""Evaluate a Diffusion Policy (EEF pose state and actions) on the UR5 station."""
 
+import argparse
+
+import numpy as np
 from lerobot.common.datasets.lerobot_dataset import LeRobotDataset
+
 from robot_imitation_glue.agents.gello.gello_agent import GelloAgent
 from robot_imitation_glue.agents.lerobot_agent import LerobotAgent, make_lerobot_policy
 from robot_imitation_glue.dataset_recorder import LeRobotDatasetRecorder
@@ -16,12 +20,19 @@ from robot_imitation_glue.ur5station.ur5_robot_env import (
     dynamixel_config,
 )
 
-if __name__ == "__main__":
-    checkpoint_path = "/home/tlips/Code/robot-imitation-glue/outputs/train/2025-04-15/10-52-19_pick-cube_diffusion/checkpoints/070000/pretrained_model"
-    train_dataset_path = "/home/tlips/Code/robot-imitation-glue/datasets/pick-cube-v2-remapped"
-    eval_scenarios_dataset_path = "/home/tlips/Code/robot-imitation-glue/datasets/pick-cube-eval-scenarios"
+# defaults of the command line arguments: edit them here or override them on the command line.
+CHECKPOINT_PATH = "outputs/train/pick-cube_diffusion/checkpoints/070000/pretrained_model"
+TRAIN_DATASET_PATH = "datasets/pick-cube-v2-remapped"
+EVAL_SCENARIOS_DATASET_PATH = "datasets/pick-cube-eval-scenarios"
+EVAL_DATASET_NAME = "pick-cube-eval-DP"
 
-    eval_dataset_name = "pick-cube-eval-DP"
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--checkpoint", default=CHECKPOINT_PATH, help="pretrained_model dir of the checkpoint")
+    parser.add_argument("--train-dataset", default=TRAIN_DATASET_PATH, help="dataset the policy was trained on")
+    parser.add_argument("--eval-scenarios", default=EVAL_SCENARIOS_DATASET_PATH, help="dataset with initial scenes")
+    parser.add_argument("--eval-dataset-name", default=EVAL_DATASET_NAME, help="name of the recorded eval dataset")
+    args = parser.parse_args()
 
     def preprocessor(obs_dict):
         # eef pose state, as recorded by the env during data collection
@@ -34,21 +45,20 @@ if __name__ == "__main__":
 
     teleop_agent = GelloAgent(dynamixel_config, GELLO_AGENT_PORT)
 
-    policy = make_lerobot_policy(checkpoint_path, train_dataset_path)
+    policy = make_lerobot_policy(args.checkpoint, args.train_dataset)
     lerobot_agent = LerobotAgent(policy, "cuda", preprocessor)
 
     # create a dataset recorder
-
     dataset_recorder = LeRobotDatasetRecorder(
         example_obs_dict=env.get_observations(),
         example_action=np.zeros((10,), dtype=np.float32),
-        root_dataset_dir=f"datasets/{eval_dataset_name}",
-        dataset_name=eval_dataset_name,
+        root_dataset_dir=f"datasets/{args.eval_dataset_name}",
+        dataset_name=args.eval_dataset_name,
         fps=10,
         use_videos=True,
     )
 
-    eval_scenarios_dataset = LeRobotDataset(repo_id="", root=eval_scenarios_dataset_path)
+    eval_scenarios_dataset = LeRobotDataset(repo_id="", root=args.eval_scenarios)
     input("Press Enter to start evaluation (should hold your teleop in place now!)")
     eval(
         env,

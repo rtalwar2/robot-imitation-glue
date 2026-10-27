@@ -3,7 +3,7 @@ from pathlib import Path
 
 import numpy as np
 
-from robot_imitation_glue.agents.gello import DynamixelConfig, GelloAgent
+from robot_imitation_glue.agents.gello import GelloAgent
 from robot_imitation_glue.collect_data import collect_data
 from robot_imitation_glue.dataset_recorder import LeRobotDatasetRecorder
 
@@ -17,6 +17,7 @@ from robot_imitation_glue.ur5station.ur5_robot_env import (
     GELLO_AGENT_PORT,
     UR5eStation,
     convert_abs_gello_actions_to_se3,
+    dynamixel_config,
 )
 
 if __name__ == "__main__":
@@ -29,13 +30,7 @@ if __name__ == "__main__":
 
     env = UR5eStation()
 
-    config = DynamixelConfig(
-        joint_ids=[1, 2, 3, 4, 5, 6],
-        joint_offsets=(np.array([40, 16, 25, 40, 15, 7]) * np.pi / 16).tolist(),
-        joint_signs=[1, 1, -1, 1, 1, 1],
-        gripper_config=(7, 194, 152),
-    )
-    agent = GelloAgent(config, GELLO_AGENT_PORT)
+    agent = GelloAgent(dynamixel_config, GELLO_AGENT_PORT)
 
     dataset_recorder = LeRobotDatasetRecorder(
         example_obs_dict=env.get_observations(),

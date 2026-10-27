@@ -1,6 +1,10 @@
-import numpy as np
+"""Evaluate pi0 (served by openpi, joint-space state and actions) on the UR5 station."""
 
+import argparse
+
+import numpy as np
 from lerobot.common.datasets.lerobot_dataset import LeRobotDataset
+
 from robot_imitation_glue.agents.gello.gello_agent import GelloAgent
 from robot_imitation_glue.agents.openpi_agent import OpenPIAgent
 from robot_imitation_glue.dataset_recorder import LeRobotDatasetRecorder
@@ -14,11 +18,21 @@ from robot_imitation_glue.ur5station.ur5_robot_env import (
     dynamixel_config,
 )
 
-if __name__ == "__main__":
-    dataset_path = "/home/tlips/Code/robot-imitation-glue/datasets/pour-cup-v2"
+# defaults of the command line arguments: edit them here or override them on the command line.
+TRAIN_DATASET_PATH = "datasets/pour-cup-v2"
+EVAL_DATASET_NAME = "pour-cup-eval-pi0"
+PROMPT = "pour the white mug in the transparent cup"
+OPENPI_HOST = "localhost"
+OPENPI_PORT = 8000
 
-    eval_dataset_name = "pour-cup-eval-pi0"
-    prompt = "pour the white mug in the transparent cup"
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--train-dataset", default=TRAIN_DATASET_PATH, help="dataset whose scenes are replayed")
+    parser.add_argument("--eval-dataset-name", default=EVAL_DATASET_NAME, help="name of the recorded eval dataset")
+    parser.add_argument("--prompt", default=PROMPT, help="language instruction for the policy")
+    parser.add_argument("--host", default=OPENPI_HOST, help="host of the openpi policy server")
+    parser.add_argument("--port", type=int, default=OPENPI_PORT, help="port of the openpi policy server")
+    args = parser.parse_args()
 
     def preprocessor(obs_dict):
         # joint state, matching the joint dataset transform in prepare_datasets.py
@@ -34,25 +48,24 @@ if __name__ == "__main__":
     teleop_agent = GelloAgent(dynamixel_config, GELLO_AGENT_PORT)
 
     pi0_agent = OpenPIAgent(
-        default_prompt=prompt,
+        default_prompt=args.prompt,
         observation_preprocessor=preprocessor,
-        host="localhost",
-        port=8000,
+        host=args.host,
+        port=args.port,
         n_action_steps=10,
     )
 
     # create a dataset recorder
-
     dataset_recorder = LeRobotDatasetRecorder(
         example_obs_dict=env.get_observations(),
         example_action=np.zeros((7,), dtype=np.float32),
-        root_dataset_dir=f"datasets/{eval_dataset_name}",
-        dataset_name=eval_dataset_name,
+        root_dataset_dir=f"datasets/{args.eval_dataset_name}",
+        dataset_name=args.eval_dataset_name,
         fps=10,
         use_videos=True,
     )
 
-    train_dataset = LeRobotDataset(repo_id="", root=dataset_path)
+    train_dataset = LeRobotDataset(repo_id="", root=args.train_dataset)
     input("Press Enter to start evaluation (should hold your teleop in place now!)")
     eval(
         env,

@@ -1,8 +1,8 @@
 import time
 
+from lerobot.common.datasets.lerobot_dataset import LeRobotDataset
 from loguru import logger
 
-from lerobot.common.datasets.lerobot_dataset import LeRobotDataset
 from robot_imitation_glue.base import BaseEnv
 from robot_imitation_glue.preprocessing import lerobot_tensor_to_image
 
@@ -36,27 +36,12 @@ def replay_episode(
     # as eval_agent already did.
     dataset_initial_image = lerobot_tensor_to_image(dataset_initial_image)
 
-    # while True:
-    #     img = env.get_observations()[image_key]
-
-    #     # blend the two images
-    #     blended_image = cv2.addWeighted(dataset_initial_image, 0.5, img, 0.5, 0)
-    #     print(f"blended_image.shape = {blended_image.shape}")
-    #     cv2.imshow("image", blended_image)
-    #     print(f"img.shape = {img.shape}")
-    #     k = cv2.waitKey(1)
-    #     print(f"k = {k}")
-    #     if k == ord('q'):
-    #         break
-
     input("Press Enter to start replay")
 
     duration = 1.0 / fps
     for i in range(episode_start_idx, episode_to_idx):
         action = dataset[i]["action"].cpu().numpy()
         obs = env.get_observations()
-        # print(f"current obs = {obs}")
-        # print(f"dataset obs = {dataset[i]}")
         robot_pose, gripper = action_to_env_converter(env.get_robot_pose_se3(), env.get_gripper_opening(), action)
         logger.debug(f"target robot pose = {robot_pose}")
         logger.debug(f"current robot pose = {env.get_robot_pose_se3()}")
