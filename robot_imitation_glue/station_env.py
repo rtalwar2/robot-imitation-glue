@@ -41,9 +41,7 @@ class ManipulatorStation(BaseEnv):
 
     def _setup_cameras(self, create_wrist_camera, create_scene_camera):
         # imported here so that the env can be constructed without the ipc stack (e.g. in tests)
-        from robot_imitation_glue.hardware.ipc_camera import RGBCameraPublisher, RGBCameraSubscriber, initialize_ipc
-
-        initialize_ipc()
+        from robot_imitation_glue.hardware.ipc_camera import RGBCameraPublisher, RGBCameraSubscriber
 
         logger.info("Creating wrist camera publisher.")
         self._wrist_camera_publisher = RGBCameraPublisher(
@@ -97,8 +95,10 @@ class ManipulatorStation(BaseEnv):
 
     def get_observations(self):
         start_time = time.time()
-        wrist_image = self._wrist_camera_subscriber.get_rgb_image_as_int()
-        scene_image = self._scene_camera_subscriber.get_rgb_image_as_int()
+        self._wrist_camera_subscriber.grab_images()
+        self._scene_camera_subscriber.grab_images()
+        wrist_image = self._wrist_camera_subscriber.retrieve_rgb_image_as_int()
+        scene_image = self._scene_camera_subscriber.retrieve_rgb_image_as_int()
         robot_state = self.get_robot_pose_euler().astype(np.float32)
         gripper_state = self.get_gripper_opening().astype(np.float32)
         joints = self.robot.get_joint_configuration().astype(np.float32)
